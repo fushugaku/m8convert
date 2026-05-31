@@ -1559,7 +1559,7 @@ fn map_s3m_effect(
                 used_table_effect,
             )
         }
-        5 => map_pitch_slide(
+        5 => map_s3m_pitch_slide(
             step,
             table_allocator,
             tables,
@@ -1569,7 +1569,7 @@ fn map_s3m_effect(
             pitch_slide_memory,
             used_table_effect,
         ),
-        6 => map_pitch_slide(
+        6 => map_s3m_pitch_slide(
             step,
             table_allocator,
             tables,
@@ -1579,7 +1579,7 @@ fn map_s3m_effect(
             pitch_slide_memory,
             used_table_effect,
         ),
-        7 => map_tone_portamento(
+        7 => map_s3m_tone_portamento(
             step,
             table_allocator,
             tables,
@@ -1611,7 +1611,7 @@ fn map_s3m_effect(
             vibrato_mapped && volume_mapped
         }
         12 => {
-            let tone_mapped = map_tone_portamento(
+            let tone_mapped = map_s3m_tone_portamento(
                 step,
                 table_allocator,
                 tables,
@@ -1755,6 +1755,63 @@ fn map_pitch_slide(
     )
 }
 
+fn map_s3m_pitch_slide(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    amount: u8,
+    speed: u8,
+    upward: bool,
+    memory: &mut PitchSlideMemory,
+    used_table_effect: &mut bool,
+) -> bool {
+    let amount = if amount == 0 {
+        if upward { memory.up } else { memory.down }
+    } else {
+        if upward {
+            memory.up = amount;
+        } else {
+            memory.down = amount;
+        }
+        amount
+    };
+    if amount == 0 {
+        return true;
+    }
+
+    let Some((scaled_amount, rows)) = s3m_pitch_slide_shape(amount, speed) else {
+        return true;
+    };
+    if rows == 0 || scaled_amount == 0 {
+        return true;
+    }
+
+    map_table(
+        step,
+        table_allocator,
+        tables,
+        TableSpec::FineSlide {
+            delta: if upward {
+                positive_delta(scaled_amount)
+            } else {
+                negative_delta(scaled_amount)
+            },
+            rows,
+        },
+        used_table_effect,
+    )
+}
+
+fn s3m_pitch_slide_shape(amount: u8, speed: u8) -> Option<(u8, u8)> {
+    let high = amount >> 4;
+    let low = amount & 0x0f;
+    match high {
+        0x0e if low != 0 => Some((low, 1)),
+        0x0f if low != 0 => Some((low.saturating_mul(4), 1)),
+        _ => Some((amount.saturating_mul(4), tracker_effect_rows(speed))),
+    }
+}
+
 fn map_tone_portamento(
     step: &mut Step,
     table_allocator: &mut TableAllocator,
@@ -1791,6 +1848,27 @@ fn map_tone_portamento(
         table_allocator,
         tables,
         TableSpec::FineSlide { delta, rows },
+        used_table_effect,
+    )
+}
+
+fn map_s3m_tone_portamento(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    amount: u8,
+    speed: u8,
+    state: &mut TonePortamentoState,
+    used_table_effect: &mut bool,
+) -> bool {
+    let scaled_amount = amount.saturating_mul(4);
+    map_tone_portamento(
+        step,
+        table_allocator,
+        tables,
+        scaled_amount,
+        speed,
+        state,
         used_table_effect,
     )
 }
@@ -2303,6 +2381,13 @@ mod tests {
     fn s3m_global_volume_scales_velocity() {
         assert_eq!(volume_to_s3m_velocity(64, 64), 255);
         assert_eq!(volume_to_s3m_velocity(64, 32), 127);
+    }
+
+    #[test]
+    fn s3m_pitch_slide_uses_st3_period_scale() {
+        assert_eq!(s3m_pitch_slide_shape(0x10, 3), Some((0x40, 2)));
+        assert_eq!(s3m_pitch_slide_shape(0xf2, 6), Some((0x08, 1)));
+        assert_eq!(s3m_pitch_slide_shape(0xe2, 6), Some((0x02, 1)));
     }
 
     fn test_mod_module() -> Module {
