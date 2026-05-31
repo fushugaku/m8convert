@@ -192,6 +192,7 @@ pub fn export_editable_m8(
     patch_header(
         &mut song_bytes,
         options.song_name.as_deref().unwrap_or(&module.title),
+        options.bundle_directory.as_deref(),
     );
 
     Ok(M8Export { song_bytes, report })
@@ -326,6 +327,7 @@ pub fn export_hvl_editable_m8(
     patch_header(
         &mut song_bytes,
         options.song_name.as_deref().unwrap_or(&module.title),
+        options.bundle_directory.as_deref(),
     );
 
     Ok(M8Export { song_bytes, report })
@@ -455,6 +457,7 @@ pub fn export_s3m_editable_m8(
     patch_header(
         &mut song_bytes,
         options.song_name.as_deref().unwrap_or(&module.title),
+        options.bundle_directory.as_deref(),
     );
 
     Ok(M8Export { song_bytes, report })
@@ -834,16 +837,25 @@ fn empty_hvl_step() -> HvlStep {
     }
 }
 
-fn patch_header(song_bytes: &mut [u8], title: &str) {
+fn patch_header(song_bytes: &mut [u8], title: &str, bundle_directory: Option<&str>) {
+    let directory_offset = 14;
+    if let Some(directory) = bundle_directory {
+        patch_fixed_ascii(song_bytes, directory_offset, 128, directory);
+    }
+
     let name_offset = 14 + 128 + 1 + 4 + 1;
-    if song_bytes.len() < name_offset + 12 {
+    patch_fixed_ascii(song_bytes, name_offset, 12, title);
+}
+
+fn patch_fixed_ascii(bytes: &mut [u8], offset: usize, len: usize, value: &str) {
+    if bytes.len() < offset + len {
         return;
     }
 
-    let name = truncate_ascii(title, 12);
-    song_bytes[name_offset..name_offset + 12].fill(0);
-    let bytes = name.as_bytes();
-    song_bytes[name_offset..name_offset + bytes.len()].copy_from_slice(bytes);
+    let value = truncate_ascii(value, len);
+    bytes[offset..offset + len].fill(0);
+    let value_bytes = value.as_bytes();
+    bytes[offset..offset + value_bytes.len()].copy_from_slice(value_bytes);
 }
 
 pub fn sample_filename(index: usize, name: &str) -> String {

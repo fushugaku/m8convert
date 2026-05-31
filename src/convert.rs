@@ -14,6 +14,7 @@ use crate::wav::{encode_s3m_sample_as_wav, encode_sample_as_wav};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConversionOptions {
     pub song_name: Option<String>,
+    pub bundle_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,11 +82,13 @@ pub fn convert_mod(
     options: ConversionOptions,
 ) -> Result<ConvertedBundle, ConvertError> {
     let module = parse_mod(input)?;
-    let m8_export = export_editable_m8(&module, &options)?;
     let project_name = project_name(&module, options.song_name.as_deref());
+    let bundle_root = bundle_root(&project_name);
+    let m8_options = m8_options(&options, &project_name);
+    let m8_export = export_editable_m8(&module, &m8_options)?;
 
     let mut files = vec![bundle_file(
-        format!("{project_name}.m8s"),
+        format!("{bundle_root}{project_name}.m8s"),
         "application/octet-stream",
         m8_export.song_bytes,
     )];
@@ -96,7 +99,10 @@ pub fn convert_mod(
         }
 
         files.push(bundle_file(
-            format!("Samples/{}", sample_filename(index, &sample.name)),
+            format!(
+                "{bundle_root}Samples/{}",
+                sample_filename(index, &sample.name)
+            ),
             "audio/wav",
             encode_sample_as_wav(sample),
         ));
@@ -114,14 +120,14 @@ pub fn convert_mod(
 
     let report_bytes = serde_json::to_vec_pretty(&report).map_err(ConvertError::Report)?;
     files.push(bundle_file(
-        "conversion-report.json",
+        format!("{bundle_root}conversion-report.json"),
         "application/json",
         report_bytes,
     ));
 
     let manifest = manifest_json(&module, &project_name)?;
     files.push(bundle_file(
-        "m8convert-project.json",
+        format!("{bundle_root}m8convert-project.json"),
         "application/json",
         manifest,
     ));
@@ -138,12 +144,14 @@ pub fn convert_hvl(
     options: ConversionOptions,
 ) -> Result<ConvertedBundle, ConvertError> {
     let module = parse_hvl(input)?;
-    let m8_export = export_hvl_editable_m8(&module, &options)?;
     let project_name =
         project_name_from_title(&module.title, options.song_name.as_deref(), "converted_hvl");
+    let bundle_root = bundle_root(&project_name);
+    let m8_options = m8_options(&options, &project_name);
+    let m8_export = export_hvl_editable_m8(&module, &m8_options)?;
 
     let mut files = vec![bundle_file(
-        format!("{project_name}.m8s"),
+        format!("{bundle_root}{project_name}.m8s"),
         "application/octet-stream",
         m8_export.song_bytes,
     )];
@@ -160,14 +168,14 @@ pub fn convert_hvl(
 
     let report_bytes = serde_json::to_vec_pretty(&report).map_err(ConvertError::Report)?;
     files.push(bundle_file(
-        "conversion-report.json",
+        format!("{bundle_root}conversion-report.json"),
         "application/json",
         report_bytes,
     ));
 
     let manifest = hvl_manifest_json(&module, &project_name)?;
     files.push(bundle_file(
-        "m8convert-project.json",
+        format!("{bundle_root}m8convert-project.json"),
         "application/json",
         manifest,
     ));
@@ -184,12 +192,14 @@ pub fn convert_s3m(
     options: ConversionOptions,
 ) -> Result<ConvertedBundle, ConvertError> {
     let module = parse_s3m(input)?;
-    let m8_export = export_s3m_editable_m8(&module, &options)?;
     let project_name =
         project_name_from_title(&module.title, options.song_name.as_deref(), "converted_s3m");
+    let bundle_root = bundle_root(&project_name);
+    let m8_options = m8_options(&options, &project_name);
+    let m8_export = export_s3m_editable_m8(&module, &m8_options)?;
 
     let mut files = vec![bundle_file(
-        format!("{project_name}.m8s"),
+        format!("{bundle_root}{project_name}.m8s"),
         "application/octet-stream",
         m8_export.song_bytes,
     )];
@@ -199,7 +209,10 @@ pub fn convert_s3m(
             continue;
         }
         files.push(bundle_file(
-            format!("Samples/{}", s3m_sample_filename(index, &sample.name)),
+            format!(
+                "{bundle_root}Samples/{}",
+                s3m_sample_filename(index, &sample.name)
+            ),
             "audio/wav",
             encode_s3m_sample_as_wav(sample),
         ));
@@ -217,14 +230,14 @@ pub fn convert_s3m(
 
     let report_bytes = serde_json::to_vec_pretty(&report).map_err(ConvertError::Report)?;
     files.push(bundle_file(
-        "conversion-report.json",
+        format!("{bundle_root}conversion-report.json"),
         "application/json",
         report_bytes,
     ));
 
     let manifest = s3m_manifest_json(&module, &project_name)?;
     files.push(bundle_file(
-        "m8convert-project.json",
+        format!("{bundle_root}m8convert-project.json"),
         "application/json",
         manifest,
     ));
@@ -441,6 +454,20 @@ fn bundle_file(path: impl Into<String>, mime_type: impl Into<String>, data: Vec<
     }
 }
 
+fn bundle_root(project_name: &str) -> String {
+    format!("Bundles/{project_name}/")
+}
+
+fn m8_options(options: &ConversionOptions, project_name: &str) -> ConversionOptions {
+    ConversionOptions {
+        song_name: Some(project_name.to_string()),
+        bundle_directory: options
+            .bundle_directory
+            .clone()
+            .or_else(|| Some(format!("/Bundles/{project_name}/"))),
+    }
+}
+
 fn project_name(module: &Module, override_name: Option<&str>) -> String {
     project_name_from_title(&module.title, override_name, "converted_mod")
 }
@@ -481,6 +508,12 @@ mod tests {
 
         assert!(bundle.files.iter().any(|file| file.path.ends_with(".m8s")));
         assert!(bundle.files.iter().any(|file| file.path.ends_with(".wav")));
+        assert!(
+            bundle
+                .files
+                .iter()
+                .all(|file| file.path.starts_with("Bundles/TEST/"))
+        );
         assert_eq!(bundle.report.m8.unsupported_effects.len(), 0);
 
         let song_file = bundle
@@ -491,6 +524,7 @@ mod tests {
         let song_bytes = STANDARD.decode(&song_file.data_base64).expect("base64");
         let mut reader: &[u8] = &song_bytes;
         let song = Song::read(&mut reader).expect("m8 song is readable");
+        assert_eq!(song.directory, "/Bundles/TEST/");
         assert_ne!(song.song.steps[0], 0xff);
     }
 

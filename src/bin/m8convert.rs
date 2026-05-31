@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &input,
         ConversionOptions {
             song_name: args.song_name,
+            ..ConversionOptions::default()
         },
     )?;
 
