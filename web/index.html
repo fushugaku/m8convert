@@ -58,9 +58,40 @@
         margin-bottom: 16px;
       }
 
-      input[type="file"] {
-        display: block;
+      .file-input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+
+      .file-picker {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
         margin-bottom: 16px;
+      }
+
+      .file-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0;
+        border-radius: 6px;
+        background: #202124;
+        color: white;
+        padding: 10px 14px;
+        cursor: pointer;
+        font-weight: 650;
+      }
+
+      .file-help {
+        min-width: 0;
+        color: #4f5457;
+        font-size: 14px;
       }
 
       button {
@@ -173,7 +204,11 @@
         <input id="song-name" type="text" maxlength="32" placeholder="Optional M8 project name" />
 
         <label for="mod-file">Tracker file</label>
-        <input id="mod-file" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" />
+        <div class="file-picker">
+          <input id="mod-file" class="file-input" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" />
+          <label class="file-button" for="mod-file">Choose file</label>
+          <span id="file-help" class="file-help">Supported formats: MOD, HVL, S3M</span>
+        </div>
 
         <button id="convert" disabled>Convert</button>
         <p id="status" class="status">Loading converter...</p>
@@ -183,8 +218,9 @@
     </main>
 
     <script type="module">
-      const buildStamp = "20260531-sampler-path-fix";
+      const buildStamp = "20260531-supported-formats";
       const fileInput = document.querySelector("#mod-file");
+      const fileHelp = document.querySelector("#file-help");
       const songName = document.querySelector("#song-name");
       const button = document.querySelector("#convert");
       const downloads = document.querySelector("#downloads");
@@ -203,8 +239,10 @@
         } else if (!converterReady) {
           status.textContent = "Loading converter...";
         } else if (hasFile()) {
+          fileHelp.textContent = fileInput.files[0].name;
           status.textContent = `${fileInput.files[0].name} is ready.`;
         } else {
+          fileHelp.textContent = "Supported formats: MOD, HVL, S3M";
           status.textContent = "Choose a MOD, HVL, or S3M file.";
         }
       };
