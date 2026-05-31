@@ -1305,24 +1305,24 @@ fn s3m_static_channel_pans(
 ) -> Vec<Option<u8>> {
     let mut channel_static_pans = vec![None; module.channel_pans.len()];
     for source_channel in module.active_channels.iter().take(M8_TRACKS) {
-        if !s3m_channel_has_pan_changes(module, playback_blocks, *source_channel) {
-            channel_static_pans[*source_channel] = Some(
-                module
-                    .channel_pans
-                    .get(*source_channel)
-                    .copied()
-                    .unwrap_or(0x80),
-            );
-        }
+        channel_static_pans[*source_channel] =
+            s3m_channel_static_note_pan(module, playback_blocks, *source_channel);
     }
     channel_static_pans
 }
 
-fn s3m_channel_has_pan_changes(
+fn s3m_channel_static_note_pan(
     module: &S3mModule,
     playback_blocks: &[PlaybackBlock],
     source_channel: usize,
-) -> bool {
+) -> Option<u8> {
+    let mut current_pan = module
+        .channel_pans
+        .get(source_channel)
+        .copied()
+        .unwrap_or(0x80);
+    let mut note_pan = None;
+
     for block in playback_blocks {
         let Some(pattern) = module.patterns.get(block.pattern_id as usize) else {
             continue;
@@ -1332,12 +1332,19 @@ fn s3m_channel_has_pan_changes(
                 continue;
             }
             let cell = pattern.rows[playback_row.source_row][source_channel];
-            if s3m_cell_changes_pan(cell) {
-                return true;
+            let row_pan = s3m_cell_pan(cell).unwrap_or(current_pan);
+            if s3m_cell_triggers_note(cell) {
+                match note_pan {
+                    Some(existing) if existing != row_pan => return None,
+                    None => note_pan = Some(row_pan),
+                    _ => {}
+                }
             }
+            current_pan = row_pan;
         }
     }
-    false
+
+    Some(note_pan.unwrap_or(current_pan))
 }
 
 fn s3m_static_pan_instrument_uses(
@@ -1646,7 +1653,7 @@ fn convert_s3m_cell(
         *current_velocity = step.velocity;
     }
     let wrote_pan = if let Some(pan) = s3m_volume_column_pan(cell.volume) {
-        map_pan(&mut step, pan, current_pan)
+        map_s3m_pan(&mut step, pan, current_pan, static_channel_pan)
     } else {
         false
     };
@@ -1676,6 +1683,7 @@ fn convert_s3m_cell(
         pitch_slide_memory,
         tone_portamento,
         current_pan,
+        static_channel_pan,
         &mut used_table_effect,
         &mut used_pitch_bend,
     );
@@ -1895,6 +1903,7 @@ fn map_s3m_effect(
     pitch_slide_memory: &mut PitchSlideMemory,
     tone_portamento: &mut TonePortamentoState,
     current_pan: &mut u8,
+    static_channel_pan: Option<u8>,
     used_table_effect: &mut bool,
     used_pitch_bend: &mut bool,
 ) -> bool {
@@ -1994,14 +2003,19 @@ fn map_s3m_effect(
             used_table_effect,
         ),
         19 => match cell.info >> 4 {
-            0x08 => map_pan(step, s3m_pan_nibble_to_m8(cell.info & 0x0f), current_pan),
+            0x08 => map_s3m_pan(
+                step,
+                s3m_pan_nibble_to_m8(cell.info & 0x0f),
+                current_pan,
+                static_channel_pan,
+            ),
             0x0b | 0x0e => true,
             0x0c => push_fx(step, FX_KIL, cell.info & 0x0f),
             0x0d => push_fx(step, FX_DEL, cell.info & 0x0f),
             _ => false,
         },
         22 | 23 => true,
-        24 => map_pan(step, cell.info, current_pan),
+        24 => map_s3m_pan(step, cell.info, current_pan, static_channel_pan),
         _ => false,
     }
 }
@@ -2257,9 +2271,18 @@ fn map_s3m_tone_portamento(
     map_tone_portamento(step, scaled_amount, speed, state)
 }
 
-fn map_pan(step: &mut Step, pan: u8, current_pan: &mut u8) -> bool {
+fn map_s3m_pan(
+    step: &mut Step,
+    pan: u8,
+    current_pan: &mut u8,
+    static_channel_pan: Option<u8>,
+) -> bool {
     *current_pan = pan;
-    push_fx(step, FX_SAMPLER_PAN, pan)
+    if static_channel_pan == Some(pan) {
+        true
+    } else {
+        push_fx(step, FX_SAMPLER_PAN, pan)
+    }
 }
 
 fn map_table(
@@ -2473,10 +2496,13 @@ fn s3m_volume_column_pan(volume: u8) -> Option<u8> {
     })
 }
 
-fn s3m_cell_changes_pan(cell: S3mCell) -> bool {
-    s3m_volume_column_pan(cell.volume).is_some()
-        || matches!(cell.command, 24)
-        || (cell.command == 19 && cell.info >> 4 == 0x08)
+fn s3m_cell_pan(cell: S3mCell) -> Option<u8> {
+    let volume_pan = s3m_volume_column_pan(cell.volume);
+    match cell.command {
+        19 if cell.info >> 4 == 0x08 => Some(s3m_pan_nibble_to_m8(cell.info & 0x0f)),
+        24 => Some(cell.info),
+        _ => volume_pan,
+    }
 }
 
 fn s3m_cell_triggers_note(cell: S3mCell) -> bool {
@@ -3113,6 +3139,40 @@ mod tests {
     }
 
     #[test]
+    fn s3m_redundant_pan_command_uses_instrument_pan() {
+        let mut module = test_s3m_module();
+        module.patterns[0].rows[0][0] = S3mCell {
+            command: 24,
+            info: 0x33,
+            ..S3mCell::EMPTY
+        };
+        module.patterns[0].rows[1][0] = S3mCell {
+            note: 0x40,
+            instrument: 1,
+            ..S3mCell::EMPTY
+        };
+        module.patterns[0].rows[2][0] = S3mCell {
+            note: 0x42,
+            ..S3mCell::EMPTY
+        };
+
+        let song = export_s3m_song(&module);
+        let Instrument::Sampler(sampler) = &song.instruments[0] else {
+            panic!("expected sampler");
+        };
+        assert_eq!(sampler.synth_params.mixer_pan, 0x33);
+
+        for row in 0..3 {
+            let step = &song.phrases[0].steps[row];
+            assert!(
+                [&step.fx1, &step.fx2, &step.fx3]
+                    .iter()
+                    .all(|fx| fx.command != FX_SAMPLER_PAN)
+            );
+        }
+    }
+
+    #[test]
     fn s3m_dynamic_channel_pan_keeps_phrase_pan() {
         let mut module = test_s3m_module();
         module.channel_pans[0] = 0x33;
@@ -3124,6 +3184,10 @@ mod tests {
         module.patterns[0].rows[1][0] = S3mCell {
             command: 24,
             info: 0x80,
+            ..S3mCell::EMPTY
+        };
+        module.patterns[0].rows[2][0] = S3mCell {
+            note: 0x42,
             ..S3mCell::EMPTY
         };
 
