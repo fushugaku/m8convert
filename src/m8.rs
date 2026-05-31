@@ -1027,6 +1027,7 @@ fn hvl_plist_waveform(waveform: u8) -> u8 {
 }
 
 fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: &mut M8Report) {
+    let table_tick = s3m_table_tick(module.initial_speed);
     for (index, sample) in module
         .instruments
         .iter()
@@ -1073,7 +1074,7 @@ fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: 
             number: index as u8,
             name: truncate_ascii(&fallback_sample_name(index, &sample.name), 12),
             transpose: true,
-            table_tick: TABLE_TICK_PER_TRACKER_TICK,
+            table_tick,
             synth_params: sampler_params(sample.volume),
             sample_path: format!("Samples/{}", s3m_sample_filename(index, &sample.name)),
             play_mode: if sample.is_looped() {
@@ -1088,6 +1089,11 @@ fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: 
             degrade: 0,
         });
     }
+}
+
+fn s3m_table_tick(speed: u8) -> u8 {
+    let speed = speed.max(1);
+    ((6 + speed / 2) / speed).clamp(1, 6)
 }
 
 fn convert_cell(
@@ -2388,6 +2394,12 @@ mod tests {
         assert_eq!(s3m_pitch_slide_shape(0x10, 3), Some((0x40, 2)));
         assert_eq!(s3m_pitch_slide_shape(0xf2, 6), Some((0x08, 1)));
         assert_eq!(s3m_pitch_slide_shape(0xe2, 6), Some((0x02, 1)));
+    }
+
+    #[test]
+    fn s3m_table_tick_stretches_fast_tracker_speeds() {
+        assert_eq!(s3m_table_tick(3), 2);
+        assert_eq!(s3m_table_tick(6), 1);
     }
 
     fn test_mod_module() -> Module {

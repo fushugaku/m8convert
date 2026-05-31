@@ -2,7 +2,6 @@ use crate::modfile::Sample;
 use crate::s3mfile::S3mInstrument;
 
 const SAMPLE_RATE: u32 = 8363;
-pub const M8_SAMPLE_RATE: u32 = 44_100;
 
 pub fn encode_sample_as_wav(sample: &Sample) -> Vec<u8> {
     let mut data: Vec<u8> = sample
@@ -45,18 +44,21 @@ pub fn encode_sample_as_wav(sample: &Sample) -> Vec<u8> {
 
 pub fn encode_s3m_sample_as_wav(sample: &S3mInstrument) -> Vec<u8> {
     let source_rate = sample.c5_speed.max(1);
-    let pcm = resample_i16_linear(&sample.data, source_rate, M8_SAMPLE_RATE);
-    let mut data = Vec::with_capacity(pcm.len() * 2);
-    for value in &pcm {
+    let mut data = Vec::with_capacity(sample.data.len() * 2);
+    for value in &sample.data {
         data.extend_from_slice(&value.to_le_bytes());
     }
 
     let smpl_chunk = sample.is_looped().then(|| {
-        let loop_start = scale_sample_position(sample.loop_start, source_rate, M8_SAMPLE_RATE);
-        let loop_end = scale_sample_position(sample.loop_end, source_rate, M8_SAMPLE_RATE)
+        let loop_start = sample.loop_start;
+        let loop_end = sample
+            .loop_end
             .saturating_sub(1)
-            .min(pcm.len().saturating_sub(1) as u32);
-        smpl_chunk_from_points(loop_start.min(pcm.len().saturating_sub(1) as u32), loop_end)
+            .min(sample.data.len().saturating_sub(1) as u32);
+        smpl_chunk_from_points(
+            loop_start.min(sample.data.len().saturating_sub(1) as u32),
+            loop_end,
+        )
     });
     let smpl_len = smpl_chunk.as_ref().map(|chunk| chunk.len()).unwrap_or(0);
     let riff_size = 4 + (8 + 16) + (8 + data.len()) + smpl_len;
@@ -70,8 +72,8 @@ pub fn encode_s3m_sample_as_wav(sample: &S3mInstrument) -> Vec<u8> {
     write_u32(&mut out, 16);
     write_u16(&mut out, 1);
     write_u16(&mut out, 1);
-    write_u32(&mut out, M8_SAMPLE_RATE);
-    write_u32(&mut out, M8_SAMPLE_RATE * 2);
+    write_u32(&mut out, source_rate);
+    write_u32(&mut out, source_rate * 2);
     write_u16(&mut out, 2);
     write_u16(&mut out, 16);
 
@@ -83,35 +85,6 @@ pub fn encode_s3m_sample_as_wav(sample: &S3mInstrument) -> Vec<u8> {
     write_u32(&mut out, data.len() as u32);
     out.extend_from_slice(&data);
     out
-}
-
-fn resample_i16_linear(input: &[i16], source_rate: u32, target_rate: u32) -> Vec<i16> {
-    if input.is_empty() || source_rate == target_rate {
-        return input.to_vec();
-    }
-
-    let output_len =
-        ((input.len() as u64 * target_rate as u64) + source_rate as u64 - 1) / source_rate as u64;
-    let mut output = Vec::with_capacity(output_len as usize);
-
-    for index in 0..output_len {
-        let position_num = index * source_rate as u64;
-        let base = (position_num / target_rate as u64) as usize;
-        let fraction = (position_num % target_rate as u64) as f64 / target_rate as f64;
-        let a = input[base.min(input.len() - 1)] as f64;
-        let b = input[(base + 1).min(input.len() - 1)] as f64;
-        output.push(
-            (a + (b - a) * fraction)
-                .round()
-                .clamp(i16::MIN as f64, i16::MAX as f64) as i16,
-        );
-    }
-
-    output
-}
-
-fn scale_sample_position(position: u32, source_rate: u32, target_rate: u32) -> u32 {
-    ((position as u64 * target_rate as u64) / source_rate.max(1) as u64).min(u32::MAX as u64) as u32
 }
 
 fn smpl_chunk(sample: &Sample) -> Vec<u8> {
@@ -178,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn s3m_wav_is_resampled_for_m8() {
+    fn s3m_wav_preserves_c2spd_sample_rate() {
         let sample = S3mInstrument {
             kind: 1,
             name: "tone".to_string(),
@@ -196,9 +169,9 @@ mod tests {
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(
             u32::from_le_bytes(wav[24..28].try_into().unwrap()),
-            M8_SAMPLE_RATE
+            sample.c5_speed
         );
         assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
-        assert!(wav.len() > 44 + sample.data.len() * 2);
+        assert_eq!(wav.len(), 44 + 68 + sample.data.len() * 2);
     }
 }
