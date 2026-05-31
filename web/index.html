@@ -102,18 +102,60 @@
       }
 
       .downloads {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 10px;
+        display: none;
         margin-top: 18px;
       }
 
+      .downloads.has-results {
+        display: block;
+      }
+
+      .result-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+
       .bundle-note {
-        grid-column: 1 / -1;
-        margin: 0;
+        margin: 0 0 14px;
+        border-left: 3px solid #146c5a;
+        background: #eef5f1;
         color: #4f5457;
         font-size: 14px;
         line-height: 1.45;
+        padding: 10px 12px;
+      }
+
+      .file-list {
+        border-top: 1px solid #dedbd2;
+        padding-top: 10px;
+      }
+
+      .file-list summary {
+        cursor: pointer;
+        color: #4f5457;
+        font-size: 14px;
+        user-select: none;
+      }
+
+      .file-list ul {
+        display: grid;
+        gap: 6px;
+        list-style: none;
+        margin: 10px 0 0;
+        padding: 0;
+      }
+
+      .file-list a {
+        display: block;
+        overflow: hidden;
+        color: #145f91;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
     </style>
   </head>
@@ -170,12 +212,21 @@
           zipLink.href = URL.createObjectURL(zipBlob);
           zipLink.download = `${bundle.project_name || "m8convert-bundle"}.zip`;
           zipLink.textContent = "Download ZIP";
-          downloads.append(zipLink);
+
+          const actions = document.createElement("div");
+          actions.className = "result-actions";
+          actions.append(zipLink);
 
           const bundleNote = document.createElement("p");
           bundleNote.className = "bundle-note";
-          bundleNote.textContent = `Place the ZIP contents so the converted song lives in /Bundles/${bundle.project_name}/ on the M8 SD card. The ZIP already contains that Bundles/${bundle.project_name}/ folder, so extracting it at the SD card root is enough.`;
-          downloads.append(bundleNote);
+          bundleNote.textContent = `Extract the ZIP at the M8 SD card root. It already contains Bundles/${bundle.project_name}/, so the song and samples land in the folder M8 expects.`;
+
+          const fileList = document.createElement("details");
+          fileList.className = "file-list";
+          const fileSummary = document.createElement("summary");
+          fileSummary.textContent = `Individual files (${outputFiles.length})`;
+          const fileItems = document.createElement("ul");
+          fileList.append(fileSummary, fileItems);
 
           for (const output of outputFiles) {
             const blob = new Blob([output.bytes], { type: output.mime_type });
@@ -183,9 +234,14 @@
             link.href = URL.createObjectURL(blob);
             link.download = output.path;
             link.textContent = output.path;
-            downloads.append(link);
+            link.title = output.path;
+            const item = document.createElement("li");
+            item.append(link);
+            fileItems.append(item);
           }
 
+          downloads.classList.add("has-results");
+          downloads.append(actions, bundleNote, fileList);
           report.textContent = JSON.stringify(bundle.report, null, 2);
         } catch (error) {
           report.textContent = String(error);
