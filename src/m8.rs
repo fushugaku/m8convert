@@ -757,8 +757,8 @@ fn volume_to_velocity(volume: u8) -> u8 {
 fn sampler_params(volume: u8) -> SynthParams {
     SynthParams {
         volume: volume_to_velocity(volume),
-        pitch: 0x80,
-        fine_tune: 0,
+        pitch: 0,
+        fine_tune: 0x80,
         filter_type: 0,
         filter_cutoff: 0xff,
         filter_res: 0,

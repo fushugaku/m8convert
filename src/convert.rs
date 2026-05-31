@@ -500,7 +500,7 @@ fn project_name_from_title(title: &str, override_name: Option<&str>, fallback: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use m8_file_parser::Song;
+    use m8_file_parser::{Instrument, Song};
 
     #[test]
     fn converts_minimal_mod_to_readable_m8_bundle() {
@@ -528,6 +528,7 @@ mod tests {
         let song = Song::read(&mut reader).expect("m8 song is readable");
         assert_eq!(song.directory, "/Bundles/TEST/");
         assert_ne!(song.song.steps[0], 0xff);
+        assert_sampler_pitch_defaults(&song);
     }
 
     #[test]
@@ -570,6 +571,20 @@ mod tests {
         let mut reader: &[u8] = &song_bytes;
         let song = Song::read(&mut reader).expect("m8 song is readable");
         assert_ne!(song.song.steps[0], 0xff);
+        assert_sampler_pitch_defaults(&song);
+    }
+
+    fn assert_sampler_pitch_defaults(song: &Song) {
+        let sampler = song
+            .instruments
+            .iter()
+            .find_map(|instrument| match instrument {
+                Instrument::Sampler(sampler) => Some(sampler),
+                _ => None,
+            })
+            .expect("sampler instrument");
+        assert_eq!(sampler.synth_params.pitch, 0);
+        assert_eq!(sampler.synth_params.fine_tune, 0x80);
     }
 
     fn minimal_mod() -> Vec<u8> {
