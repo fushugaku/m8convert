@@ -205,7 +205,7 @@ fn read_channel_pans(
             .enumerate()
             .map(|(channel, value)| {
                 if value & 0x20 != 0 {
-                    (value & 0x0f) * 17
+                    s3m_pan_nibble_to_m8(value & 0x0f)
                 } else {
                     default_channel_pan(channel_settings[channel])
                 }
@@ -222,11 +222,20 @@ fn read_channel_pans(
 
 fn default_channel_pan(channel_setting: u8) -> u8 {
     if channel_setting < 8 {
-        0x30
+        s3m_pan_nibble_to_m8(3)
     } else if channel_setting < 16 {
-        0xc0
+        s3m_pan_nibble_to_m8(12)
     } else {
         0x80
+    }
+}
+
+pub fn s3m_pan_nibble_to_m8(value: u8) -> u8 {
+    let value = value.min(0x0f);
+    if value == 0x08 {
+        0x80
+    } else {
+        ((value as u16 * 255 + 7) / 15) as u8
     }
 }
 
@@ -496,7 +505,7 @@ pub(crate) mod tests {
         assert_eq!(module.title, "S3MTEST");
         assert_eq!(module.orders, vec![0]);
         assert_eq!(module.active_channels[0], 0);
-        assert_eq!(module.channel_pans[0], 0x30);
+        assert_eq!(module.channel_pans[0], s3m_pan_nibble_to_m8(3));
         assert_eq!(module.patterns[0].rows[0][0].note, 0x40);
         assert_eq!(module.instruments[0].data.len(), 4);
     }
@@ -507,6 +516,15 @@ pub(crate) mod tests {
         assert_eq!(s3m_note_to_m8(0x41), Some(37));
         assert_eq!(s3m_note_to_m8(0xfe), Some(0x80));
         assert_eq!(s3m_note_to_m8(0xff), None);
+    }
+
+    #[test]
+    fn maps_s3m_pan_nibble_to_m8_pan() {
+        assert_eq!(s3m_pan_nibble_to_m8(0x00), 0x00);
+        assert_eq!(s3m_pan_nibble_to_m8(0x04), 0x44);
+        assert_eq!(s3m_pan_nibble_to_m8(0x08), 0x80);
+        assert_eq!(s3m_pan_nibble_to_m8(0x0b), 0xbb);
+        assert_eq!(s3m_pan_nibble_to_m8(0x0f), 0xff);
     }
 
     pub fn minimal_s3m() -> Vec<u8> {

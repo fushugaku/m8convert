@@ -10,7 +10,7 @@ use thiserror::Error;
 use crate::convert::ConversionOptions;
 use crate::hvlfile::{HvlInstrument, HvlModule, HvlStep};
 use crate::modfile::{Cell, Module, Pattern, period_to_note};
-use crate::s3mfile::{S3mCell, S3mModule, S3mPattern, s3m_note_to_m8};
+use crate::s3mfile::{S3mCell, S3mModule, S3mPattern, s3m_note_to_m8, s3m_pan_nibble_to_m8};
 
 const TEMPLATE: &[u8] = include_bytes!("../assets/templates/V6_2EMPTY.m8s");
 const M8_TRACKS: usize = 8;
@@ -1611,7 +1611,7 @@ fn map_s3m_effect(
         15 => push_fx(step, FX_SAMPLER_STA, cell.info),
         17 => push_fx(step, FX_RET, cell.info),
         19 => match cell.info >> 4 {
-            0x08 => map_pan(step, (cell.info & 0x0f) * 17, current_pan),
+            0x08 => map_pan(step, s3m_pan_nibble_to_m8(cell.info & 0x0f), current_pan),
             0x0b | 0x0e => true,
             0x0c => push_fx(step, FX_KIL, cell.info & 0x0f),
             0x0d => push_fx(step, FX_DEL, cell.info & 0x0f),
