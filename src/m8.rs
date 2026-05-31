@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use m8_file_parser::{
     AHDEnv, Chain, ChainStep, FX, Instrument, LFO, LfoShape, LfoTriggerMode, LimitType, Note,
@@ -17,6 +17,7 @@ const TEMPLATE: &[u8] = include_bytes!("../assets/templates/V6_2EMPTY.m8s");
 const M8_TRACKS: usize = 8;
 const M8_PHRASE_ROWS: usize = 16;
 const EMPTY: u8 = 0xff;
+const NOTE_OFF: u8 = 0x80;
 const FX_ARP: u8 = 0x00;
 const FX_DEL: u8 = 0x02;
 const FX_KIL: u8 = 0x05;
@@ -134,6 +135,12 @@ struct TonePortamentoState {
     current_period: Option<u16>,
     target_period: Option<u16>,
     speed: u8,
+}
+
+#[derive(Debug, Clone)]
+struct S3mPanPlan {
+    channel_static_pans: Vec<Option<u8>>,
+    instrument_remaps: HashMap<(u8, u8), u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -831,9 +838,10 @@ pub fn export_s3m_editable_m8(
     };
 
     clear_song(&mut song);
-    install_s3m_sampler_instruments(&mut song, module, &mut report);
-
     let playback_blocks = build_s3m_playback_blocks(module, &mut report);
+    install_s3m_sampler_instruments(&mut song, module, &mut report);
+    let pan_plan =
+        install_s3m_static_pan_instruments(&mut song, module, &playback_blocks, &mut report);
     let timing_contexts = s3m_timing_contexts(module);
     let global_volume_contexts = s3m_global_volume_contexts(module);
     let mut table_allocator = TableAllocator::new();
@@ -904,6 +912,12 @@ pub fn export_s3m_editable_m8(
                         &mut pitch_slide_memory[track],
                         &mut tone_portamento[track],
                         &mut current_pans[track],
+                        pan_plan
+                            .channel_static_pans
+                            .get(*source_channel)
+                            .copied()
+                            .flatten(),
+                        &pan_plan.instrument_remaps,
                         &mut active_table_effects[track],
                         &mut active_pitch_bends[track],
                         &mut report,
@@ -1214,6 +1228,171 @@ fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: 
     }
 }
 
+fn install_s3m_static_pan_instruments(
+    song: &mut Song,
+    module: &S3mModule,
+    playback_blocks: &[PlaybackBlock],
+    report: &mut M8Report,
+) -> S3mPanPlan {
+    let channel_static_pans = s3m_static_channel_pans(module, playback_blocks);
+    let (static_uses, neutral_uses) =
+        s3m_static_pan_instrument_uses(module, playback_blocks, &channel_static_pans);
+    let mut instrument_remaps = HashMap::new();
+    let mut next_slot = first_free_instrument_slot(song, 0);
+
+    let mut source_instruments = static_uses.keys().copied().collect::<Vec<_>>();
+    source_instruments.sort_unstable();
+
+    for source_instrument in source_instruments {
+        if source_instrument >= Song::N_INSTRUMENTS {
+            continue;
+        }
+        if !matches!(song.instruments[source_instrument], Instrument::Sampler(_)) {
+            continue;
+        }
+
+        let mut pans = static_uses
+            .get(&source_instrument)
+            .map(|values| values.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        pans.sort_unstable();
+
+        let mut can_reuse_original = !neutral_uses.contains(&source_instrument);
+        for pan in pans {
+            if pan == 0x80 {
+                continue;
+            }
+
+            if can_reuse_original {
+                if let Instrument::Sampler(sampler) = &mut song.instruments[source_instrument] {
+                    sampler.synth_params.mixer_pan = pan;
+                }
+                instrument_remaps.insert((source_instrument as u8, pan), source_instrument as u8);
+                can_reuse_original = false;
+                continue;
+            }
+
+            let Some(slot) = next_slot else {
+                report.warnings.push(format!(
+                    "S3M static pan for instrument {} could not be moved to an M8 instrument because all instrument slots are used",
+                    source_instrument + 1
+                ));
+                continue;
+            };
+
+            let Instrument::Sampler(mut sampler) = song.instruments[source_instrument].clone()
+            else {
+                continue;
+            };
+            sampler.number = slot as u8;
+            sampler.name = truncate_ascii(&format!("{} P{:02X}", sampler.name, pan), 12);
+            sampler.synth_params.mixer_pan = pan;
+            song.instruments[slot] = Instrument::Sampler(sampler);
+            instrument_remaps.insert((source_instrument as u8, pan), slot as u8);
+            next_slot = first_free_instrument_slot(song, slot + 1);
+        }
+    }
+
+    S3mPanPlan {
+        channel_static_pans,
+        instrument_remaps,
+    }
+}
+
+fn s3m_static_channel_pans(
+    module: &S3mModule,
+    playback_blocks: &[PlaybackBlock],
+) -> Vec<Option<u8>> {
+    let mut channel_static_pans = vec![None; module.channel_pans.len()];
+    for source_channel in module.active_channels.iter().take(M8_TRACKS) {
+        if !s3m_channel_has_pan_changes(module, playback_blocks, *source_channel) {
+            channel_static_pans[*source_channel] = Some(
+                module
+                    .channel_pans
+                    .get(*source_channel)
+                    .copied()
+                    .unwrap_or(0x80),
+            );
+        }
+    }
+    channel_static_pans
+}
+
+fn s3m_channel_has_pan_changes(
+    module: &S3mModule,
+    playback_blocks: &[PlaybackBlock],
+    source_channel: usize,
+) -> bool {
+    for block in playback_blocks {
+        let Some(pattern) = module.patterns.get(block.pattern_id as usize) else {
+            continue;
+        };
+        for playback_row in &block.rows {
+            if !playback_row.emit_cells {
+                continue;
+            }
+            let cell = pattern.rows[playback_row.source_row][source_channel];
+            if s3m_cell_changes_pan(cell) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn s3m_static_pan_instrument_uses(
+    module: &S3mModule,
+    playback_blocks: &[PlaybackBlock],
+    channel_static_pans: &[Option<u8>],
+) -> (HashMap<usize, HashSet<u8>>, HashSet<usize>) {
+    let mut static_uses = HashMap::<usize, HashSet<u8>>::new();
+    let mut neutral_uses = HashSet::new();
+    let mut current_instruments = vec![EMPTY; module.channel_pans.len()];
+
+    for block in playback_blocks {
+        let Some(pattern) = module.patterns.get(block.pattern_id as usize) else {
+            continue;
+        };
+        for source_channel in module.active_channels.iter().take(M8_TRACKS) {
+            for playback_row in &block.rows {
+                if !playback_row.emit_cells {
+                    continue;
+                }
+                let cell = pattern.rows[playback_row.source_row][*source_channel];
+                if cell.instrument > 0 {
+                    current_instruments[*source_channel] = cell.instrument.saturating_sub(1);
+                }
+                if !s3m_cell_triggers_note(cell) {
+                    continue;
+                }
+                let instrument = current_instruments[*source_channel];
+                if instrument == EMPTY {
+                    continue;
+                }
+                let instrument = instrument as usize;
+                match channel_static_pans.get(*source_channel).copied().flatten() {
+                    Some(0x80) | None => {
+                        neutral_uses.insert(instrument);
+                    }
+                    Some(pan) => {
+                        static_uses.entry(instrument).or_default().insert(pan);
+                    }
+                }
+            }
+        }
+    }
+
+    (static_uses, neutral_uses)
+}
+
+fn first_free_instrument_slot(song: &Song, start: usize) -> Option<usize> {
+    song.instruments
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, instrument)| matches!(instrument, Instrument::None).then_some(index))
+}
+
 fn s3m_table_tick(speed: u8) -> u8 {
     let speed = speed.max(1);
     ((6 + speed / 2) / speed).clamp(1, 6)
@@ -1421,6 +1600,8 @@ fn convert_s3m_cell(
     pitch_slide_memory: &mut PitchSlideMemory,
     tone_portamento: &mut TonePortamentoState,
     current_pan: &mut u8,
+    static_channel_pan: Option<u8>,
+    instrument_remaps: &HashMap<(u8, u8), u8>,
     active_table_effect: &mut bool,
     active_pitch_bend: &mut bool,
     report: &mut M8Report,
@@ -1431,10 +1612,15 @@ fn convert_s3m_cell(
     let mut step = empty_step();
     if let Some(note) = s3m_note_to_m8(cell.note) {
         step.note = Note(note);
-        if note == 0x80 {
-            return step;
-        }
-        if is_s3m_tone_portamento(cell) {
+        if note == NOTE_OFF {
+            tone_portamento.current_note = None;
+            tone_portamento.target_note = None;
+            tone_portamento.current_period = None;
+            tone_portamento.target_period = None;
+            tone_portamento.speed = 0;
+            pitch_slide_memory.up = 0;
+            pitch_slide_memory.down = 0;
+        } else if is_s3m_tone_portamento(cell) {
             tone_portamento.target_note = Some(note);
         } else {
             tone_portamento.current_note = Some(note);
@@ -1442,7 +1628,8 @@ fn convert_s3m_cell(
             tone_portamento.speed = 0;
             pitch_slide_memory.up = 0;
             pitch_slide_memory.down = 0;
-            step.instrument = *current_instrument;
+            step.instrument =
+                s3m_mapped_instrument(*current_instrument, static_channel_pan, instrument_remaps);
             step.velocity = if cell.volume <= 64 {
                 volume_to_s3m_velocity(cell.volume, global_volume)
             } else {
@@ -1463,7 +1650,15 @@ fn convert_s3m_cell(
     } else {
         false
     };
-    if !wrote_pan && !step.note.is_empty() && *current_pan != 0x80 {
+    let uses_static_instrument_pan = static_channel_pan.is_some_and(|pan| {
+        pan == 0x80 || instrument_remaps.contains_key(&(*current_instrument, pan))
+    });
+    if !wrote_pan
+        && !step.note.is_empty()
+        && step.note.0 != NOTE_OFF
+        && !uses_static_instrument_pan
+        && *current_pan != 0x80
+    {
         push_fx(&mut step, FX_SAMPLER_PAN, *current_pan);
     }
 
@@ -2278,6 +2473,30 @@ fn s3m_volume_column_pan(volume: u8) -> Option<u8> {
     })
 }
 
+fn s3m_cell_changes_pan(cell: S3mCell) -> bool {
+    s3m_volume_column_pan(cell.volume).is_some()
+        || matches!(cell.command, 24)
+        || (cell.command == 19 && cell.info >> 4 == 0x08)
+}
+
+fn s3m_cell_triggers_note(cell: S3mCell) -> bool {
+    s3m_note_to_m8(cell.note).is_some_and(|note| note != NOTE_OFF) && !is_s3m_tone_portamento(cell)
+}
+
+fn s3m_mapped_instrument(
+    source_instrument: u8,
+    static_channel_pan: Option<u8>,
+    instrument_remaps: &HashMap<(u8, u8), u8>,
+) -> u8 {
+    let Some(pan) = static_channel_pan else {
+        return source_instrument;
+    };
+    instrument_remaps
+        .get(&(source_instrument, pan))
+        .copied()
+        .unwrap_or(source_instrument)
+}
+
 fn is_mod_tone_portamento(cell: Cell) -> bool {
     matches!(cell.effect, 0x03 | 0x05) && cell.period != 0
 }
@@ -2806,6 +3025,123 @@ mod tests {
     }
 
     #[test]
+    fn mod_note_cut_maps_to_kil() {
+        let mut module = test_mod_module();
+        module.patterns[0].rows[0][0] = Cell {
+            effect: 0x0e,
+            effect_param: 0xc3,
+            ..empty_mod_cell()
+        };
+
+        let song = export_mod_song(&module);
+        let step = &song.phrases[0].steps[0];
+        assert!(
+            [&step.fx1, &step.fx2, &step.fx3]
+                .iter()
+                .any(|fx| fx.command == FX_KIL && fx.value == 3)
+        );
+    }
+
+    #[test]
+    fn s3m_note_cut_exports_note_off() {
+        let mut module = test_s3m_module();
+        module.patterns[0].rows[0][0] = S3mCell {
+            note: 0x40,
+            instrument: 1,
+            ..S3mCell::EMPTY
+        };
+        module.patterns[0].rows[1][0] = S3mCell {
+            note: 0xfe,
+            ..S3mCell::EMPTY
+        };
+
+        let song = export_s3m_song(&module);
+        let step = &song.phrases[0].steps[1];
+        assert_eq!(step.note.0, NOTE_OFF);
+        assert_eq!(step.instrument, EMPTY);
+        assert_eq!(step.velocity, EMPTY);
+    }
+
+    #[test]
+    fn s3m_note_cut_still_maps_row_effects() {
+        let mut module = test_s3m_module();
+        module.patterns[0].rows[0][0] = S3mCell {
+            note: 0x40,
+            instrument: 1,
+            ..S3mCell::EMPTY
+        };
+        module.patterns[0].rows[1][0] = S3mCell {
+            note: 0xfe,
+            command: 19,
+            info: 0xc3,
+            ..S3mCell::EMPTY
+        };
+
+        let song = export_s3m_song(&module);
+        let step = &song.phrases[0].steps[1];
+        assert_eq!(step.note.0, NOTE_OFF);
+        assert!(
+            [&step.fx1, &step.fx2, &step.fx3]
+                .iter()
+                .any(|fx| fx.command == FX_KIL && fx.value == 3)
+        );
+    }
+
+    #[test]
+    fn s3m_static_channel_pan_uses_instrument_pan() {
+        let mut module = test_s3m_module();
+        module.channel_pans[0] = 0x33;
+        module.patterns[0].rows[0][0] = S3mCell {
+            note: 0x40,
+            instrument: 1,
+            ..S3mCell::EMPTY
+        };
+
+        let song = export_s3m_song(&module);
+        let Instrument::Sampler(sampler) = &song.instruments[0] else {
+            panic!("expected sampler");
+        };
+        assert_eq!(sampler.synth_params.mixer_pan, 0x33);
+
+        let step = &song.phrases[0].steps[0];
+        assert_eq!(step.instrument, 0);
+        assert!(
+            [&step.fx1, &step.fx2, &step.fx3]
+                .iter()
+                .all(|fx| fx.command != FX_SAMPLER_PAN)
+        );
+    }
+
+    #[test]
+    fn s3m_dynamic_channel_pan_keeps_phrase_pan() {
+        let mut module = test_s3m_module();
+        module.channel_pans[0] = 0x33;
+        module.patterns[0].rows[0][0] = S3mCell {
+            note: 0x40,
+            instrument: 1,
+            ..S3mCell::EMPTY
+        };
+        module.patterns[0].rows[1][0] = S3mCell {
+            command: 24,
+            info: 0x80,
+            ..S3mCell::EMPTY
+        };
+
+        let song = export_s3m_song(&module);
+        let Instrument::Sampler(sampler) = &song.instruments[0] else {
+            panic!("expected sampler");
+        };
+        assert_eq!(sampler.synth_params.mixer_pan, 0x80);
+
+        let step = &song.phrases[0].steps[0];
+        assert!(
+            [&step.fx1, &step.fx2, &step.fx3]
+                .iter()
+                .any(|fx| fx.command == FX_SAMPLER_PAN && fx.value == 0x33)
+        );
+    }
+
+    #[test]
     fn tremor_table_alternates_velocity_and_silence() {
         let mut reader = Reader::new(TEMPLATE.to_vec());
         let song = Song::read_from_reader(&mut reader).expect("template");
@@ -2873,6 +3209,20 @@ mod tests {
             loop_length_bytes: 0,
             data: Vec::new(),
         }
+    }
+
+    fn export_s3m_song(module: &S3mModule) -> Song {
+        let export = export_s3m_editable_m8(module, &ConversionOptions::default())
+            .expect("s3m conversion succeeds");
+        let mut reader = Reader::new(export.song_bytes);
+        Song::read_from_reader(&mut reader).expect("read exported song")
+    }
+
+    fn export_mod_song(module: &Module) -> Song {
+        let export = export_editable_m8(module, &ConversionOptions::default())
+            .expect("mod conversion succeeds");
+        let mut reader = Reader::new(export.song_bytes);
+        Song::read_from_reader(&mut reader).expect("read exported song")
     }
 
     fn test_s3m_module() -> S3mModule {
