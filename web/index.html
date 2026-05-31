@@ -157,6 +157,12 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+
+      .status {
+        margin: 12px 0 0;
+        color: #4f5457;
+        font-size: 14px;
+      }
     </style>
   </head>
   <body>
@@ -170,36 +176,65 @@
         <input id="mod-file" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" />
 
         <button id="convert" disabled>Convert</button>
+        <p id="status" class="status">Loading converter...</p>
         <div id="downloads" class="downloads"></div>
         <pre id="report"></pre>
       </section>
     </main>
 
     <script type="module">
-      import init, { convert_tracker_to_m8_bundle_json } from "./pkg/m8convert.js";
-
+      const buildStamp = "20260531-sampler-path-fix";
       const fileInput = document.querySelector("#mod-file");
       const songName = document.querySelector("#song-name");
       const button = document.querySelector("#convert");
       const downloads = document.querySelector("#downloads");
       const report = document.querySelector("#report");
+      const status = document.querySelector("#status");
 
-      await init();
-      fileInput.addEventListener("change", () => {
-        button.disabled = !fileInput.files.length;
-      });
+      let converterReady = false;
+      let busy = false;
+      let convertTrackerToM8BundleJson = null;
+
+      const hasFile = () => Boolean(fileInput.files && fileInput.files.length > 0);
+      const refreshButton = () => {
+        button.disabled = busy || !converterReady || !hasFile();
+        if (busy) {
+          status.textContent = "Converting...";
+        } else if (!converterReady) {
+          status.textContent = "Loading converter...";
+        } else if (hasFile()) {
+          status.textContent = `${fileInput.files[0].name} is ready.`;
+        } else {
+          status.textContent = "Choose a MOD, HVL, or S3M file.";
+        }
+      };
+
+      fileInput.addEventListener("change", refreshButton);
+      fileInput.addEventListener("input", refreshButton);
+
+      try {
+        const module = await import(`./pkg/m8convert.js?v=${buildStamp}`);
+        await module.default({ module_or_path: `./pkg/m8convert_bg.wasm?v=${buildStamp}` });
+        convertTrackerToM8BundleJson = module.convert_tracker_to_m8_bundle_json;
+        converterReady = true;
+      } catch (error) {
+        report.textContent = `Could not load converter: ${error}`;
+      } finally {
+        refreshButton();
+      }
 
       button.addEventListener("click", async () => {
         const file = fileInput.files[0];
         if (!file) return;
 
-        button.disabled = true;
+        busy = true;
+        refreshButton();
         downloads.replaceChildren();
         report.textContent = "Converting...";
 
         try {
           const input = new Uint8Array(await file.arrayBuffer());
-          const raw = convert_tracker_to_m8_bundle_json(input, songName.value || undefined);
+          const raw = convertTrackerToM8BundleJson(input, songName.value || undefined);
           const bundle = JSON.parse(raw);
           const outputFiles = bundle.files.map((output) => ({
             ...output,
@@ -246,7 +281,8 @@
         } catch (error) {
           report.textContent = String(error);
         } finally {
-          button.disabled = !fileInput.files.length;
+          busy = false;
+          refreshButton();
         }
       });
 
