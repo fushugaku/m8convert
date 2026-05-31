@@ -44,7 +44,8 @@
       }
 
       input,
-      button {
+      button,
+      a.download-button {
         font: inherit;
       }
 
@@ -74,6 +75,18 @@
       button:disabled {
         opacity: 0.45;
         cursor: not-allowed;
+      }
+
+      a.download-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: fit-content;
+        border-radius: 6px;
+        background: #146c5a;
+        color: white;
+        padding: 10px 14px;
+        text-decoration: none;
       }
 
       pre {
@@ -138,10 +151,21 @@
           const input = new Uint8Array(await file.arrayBuffer());
           const raw = convert_tracker_to_m8_bundle_json(input, songName.value || undefined);
           const bundle = JSON.parse(raw);
+          const outputFiles = bundle.files.map((output) => ({
+            ...output,
+            bytes: Uint8Array.from(atob(output.data_base64), (char) => char.charCodeAt(0)),
+          }));
 
-          for (const output of bundle.files) {
-            const bytes = Uint8Array.from(atob(output.data_base64), (char) => char.charCodeAt(0));
-            const blob = new Blob([bytes], { type: output.mime_type });
+          const zipBlob = new Blob([createZip(outputFiles)], { type: "application/zip" });
+          const zipLink = document.createElement("a");
+          zipLink.className = "download-button";
+          zipLink.href = URL.createObjectURL(zipBlob);
+          zipLink.download = `${bundle.project_name || "m8convert-bundle"}.zip`;
+          zipLink.textContent = "Download ZIP";
+          downloads.append(zipLink);
+
+          for (const output of outputFiles) {
+            const blob = new Blob([output.bytes], { type: output.mime_type });
             const link = document.createElement("a");
             link.href = URL.createObjectURL(blob);
             link.download = output.path;
@@ -156,6 +180,87 @@
           button.disabled = !fileInput.files.length;
         }
       });
+
+      function createZip(files) {
+        const localParts = [];
+        const centralParts = [];
+        let offset = 0;
+
+        for (const file of files) {
+          const nameBytes = new TextEncoder().encode(file.path);
+          const crc = crc32(file.bytes);
+          const localHeader = new Uint8Array(30 + nameBytes.length);
+          const localView = new DataView(localHeader.buffer);
+          localView.setUint32(0, 0x04034b50, true);
+          localView.setUint16(4, 20, true);
+          localView.setUint16(6, 0, true);
+          localView.setUint16(8, 0, true);
+          localView.setUint16(10, dosTime(), true);
+          localView.setUint16(12, dosDate(), true);
+          localView.setUint32(14, crc, true);
+          localView.setUint32(18, file.bytes.length, true);
+          localView.setUint32(22, file.bytes.length, true);
+          localView.setUint16(26, nameBytes.length, true);
+          localHeader.set(nameBytes, 30);
+          localParts.push(localHeader, file.bytes);
+
+          const centralHeader = new Uint8Array(46 + nameBytes.length);
+          const centralView = new DataView(centralHeader.buffer);
+          centralView.setUint32(0, 0x02014b50, true);
+          centralView.setUint16(4, 20, true);
+          centralView.setUint16(6, 20, true);
+          centralView.setUint16(8, 0, true);
+          centralView.setUint16(10, 0, true);
+          centralView.setUint16(12, dosTime(), true);
+          centralView.setUint16(14, dosDate(), true);
+          centralView.setUint32(16, crc, true);
+          centralView.setUint32(20, file.bytes.length, true);
+          centralView.setUint32(24, file.bytes.length, true);
+          centralView.setUint16(28, nameBytes.length, true);
+          centralView.setUint32(42, offset, true);
+          centralHeader.set(nameBytes, 46);
+          centralParts.push(centralHeader);
+
+          offset += localHeader.length + file.bytes.length;
+        }
+
+        const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+        const endHeader = new Uint8Array(22);
+        const endView = new DataView(endHeader.buffer);
+        endView.setUint32(0, 0x06054b50, true);
+        endView.setUint16(8, files.length, true);
+        endView.setUint16(10, files.length, true);
+        endView.setUint32(12, centralSize, true);
+        endView.setUint32(16, offset, true);
+
+        return new Blob([...localParts, ...centralParts, endHeader]);
+      }
+
+      function crc32(bytes) {
+        let crc = 0xffffffff;
+        for (const byte of bytes) {
+          crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff];
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+      }
+
+      const crcTable = Array.from({ length: 256 }, (_, index) => {
+        let value = index;
+        for (let bit = 0; bit < 8; bit += 1) {
+          value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+        }
+        return value >>> 0;
+      });
+
+      function dosTime() {
+        const now = new Date();
+        return (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+      }
+
+      function dosDate() {
+        const now = new Date();
+        return ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+      }
     </script>
   </body>
 </html>

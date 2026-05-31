@@ -4,6 +4,7 @@ Rust + WebAssembly converter from ProTracker/NoiseTracker `.mod`, HivelyTracker 
 
 The converter currently emits:
 
+- a browser-downloadable `.zip` containing the complete converted bundle
 - `*.m8s` song file based on a firmware 6.2 empty M8 template
 - `Samples/*.wav` files extracted from MOD and S3M sample data
 - `conversion-report.json` with unsupported effects and limit warnings
