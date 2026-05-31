@@ -1,6 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const main: (a: number, b: number) => number;
 export const convert_mod_to_m8_bundle_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const convert_tracker_to_m8_bundle_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;

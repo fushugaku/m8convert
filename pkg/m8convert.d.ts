@@ -9,6 +9,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly main: (a: number, b: number) => number;
     readonly convert_mod_to_m8_bundle_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly convert_tracker_to_m8_bundle_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
