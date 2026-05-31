@@ -58,6 +58,11 @@
         margin-bottom: 16px;
       }
 
+      input[type="text"]:disabled {
+        background: #f0efea;
+        color: #777b7e;
+      }
+
       .file-input {
         position: absolute;
         width: 1px;
@@ -201,12 +206,12 @@
       <h1>m8convert</h1>
       <section class="panel">
         <label for="song-name">Song name</label>
-        <input id="song-name" type="text" maxlength="32" placeholder="Optional M8 project name" />
+        <input id="song-name" type="text" maxlength="32" placeholder="Auto from file name" />
 
-        <label for="mod-file">Tracker file</label>
+        <label for="mod-file">Tracker files</label>
         <div class="file-picker">
-          <input id="mod-file" class="file-input" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" />
-          <label class="file-button" for="mod-file">Choose file</label>
+          <input id="mod-file" class="file-input" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" multiple />
+          <label class="file-button" for="mod-file">Choose files</label>
           <span id="file-help" class="file-help">Supported formats: MOD, HVL, S3M</span>
         </div>
 
@@ -218,7 +223,7 @@
     </main>
 
     <script type="module">
-      const buildStamp = "20260531-flow-portamento-mix-hvl";
+      const buildStamp = "20260531-batch-convert";
       const fileInput = document.querySelector("#mod-file");
       const fileHelp = document.querySelector("#file-help");
       const songName = document.querySelector("#song-name");
@@ -230,25 +235,40 @@
       let converterReady = false;
       let busy = false;
       let convertTrackerToM8BundleJson = null;
+      let autoSongName = true;
+      let activeUrls = [];
 
-      const hasFile = () => Boolean(fileInput.files && fileInput.files.length > 0);
+      const selectedFiles = () => Array.from(fileInput.files || []);
+      const hasFile = () => selectedFiles().length > 0;
       const refreshButton = () => {
+        const files = selectedFiles();
         button.disabled = busy || !converterReady || !hasFile();
         if (busy) {
           status.textContent = "Converting...";
         } else if (!converterReady) {
           status.textContent = "Loading converter...";
         } else if (hasFile()) {
-          fileHelp.textContent = fileInput.files[0].name;
-          status.textContent = `${fileInput.files[0].name} is ready.`;
+          fileHelp.textContent = fileLabel(files);
+          status.textContent = files.length === 1
+            ? `${files[0].name} is ready.`
+            : `${files.length} files are ready.`;
         } else {
           fileHelp.textContent = "Supported formats: MOD, HVL, S3M";
-          status.textContent = "Choose a MOD, HVL, or S3M file.";
+          status.textContent = "Choose MOD, HVL, or S3M files.";
         }
       };
 
-      fileInput.addEventListener("change", refreshButton);
-      fileInput.addEventListener("input", refreshButton);
+      fileInput.addEventListener("change", () => {
+        syncSongName();
+        refreshButton();
+      });
+      fileInput.addEventListener("input", () => {
+        syncSongName();
+        refreshButton();
+      });
+      songName.addEventListener("input", () => {
+        autoSongName = false;
+      });
 
       try {
         const module = await import(`./pkg/m8convert.js?v=${buildStamp}`);
@@ -262,28 +282,63 @@
       }
 
       button.addEventListener("click", async () => {
-        const file = fileInput.files[0];
-        if (!file) return;
+        const files = selectedFiles();
+        if (files.length === 0) return;
 
         busy = true;
         refreshButton();
-        downloads.replaceChildren();
+        clearDownloads();
         report.textContent = "Converting...";
+        let completedStatus = null;
 
         try {
-          const input = new Uint8Array(await file.arrayBuffer());
-          const raw = convertTrackerToM8BundleJson(input, songName.value || undefined);
-          const bundle = JSON.parse(raw);
-          const outputFiles = bundle.files.map((output) => ({
-            ...output,
-            bytes: Uint8Array.from(atob(output.data_base64), (char) => char.charCodeAt(0)),
-          }));
+          const usedProjectNames = new Set();
+          const outputFiles = [];
+          const projects = [];
+
+          for (const [index, file] of files.entries()) {
+            status.textContent = `Converting ${index + 1}/${files.length}: ${file.name}`;
+            await nextFrame();
+
+            const requestedName = files.length === 1 && songName.value.trim()
+              ? songName.value.trim()
+              : fileBaseName(file.name);
+            const projectName = uniqueProjectName(requestedName, usedProjectNames);
+
+            try {
+              const input = new Uint8Array(await file.arrayBuffer());
+              const raw = convertTrackerToM8BundleJson(input, projectName);
+              const bundle = JSON.parse(raw);
+              const filesForBundle = bundle.files.map(decodeBundleFile);
+              outputFiles.push(...filesForBundle);
+
+              projects.push(projectReport(file, bundle, filesForBundle, "converted"));
+            } catch (error) {
+              projects.push({
+                input_file: file.name,
+                song_name: projectName,
+                status: "failed",
+                error: String(error),
+                output_files: [],
+                sample_files: 0,
+              });
+            }
+          }
+
+          const batchReport = buildBatchReport(projects, outputFiles);
+          const reportBytes = new TextEncoder().encode(JSON.stringify(batchReport, null, 2));
+          outputFiles.push({
+            path: "m8convert-batch-report.json",
+            mime_type: "application/json",
+            size: reportBytes.length,
+            bytes: reportBytes,
+          });
 
           const zipBlob = new Blob([createZip(outputFiles)], { type: "application/zip" });
           const zipLink = document.createElement("a");
           zipLink.className = "download-button";
-          zipLink.href = URL.createObjectURL(zipBlob);
-          zipLink.download = `${bundle.project_name || "m8convert-bundle"}.zip`;
+          zipLink.href = objectUrl(zipBlob);
+          zipLink.download = zipFileName(projects);
           zipLink.textContent = "Download ZIP";
 
           const actions = document.createElement("div");
@@ -292,19 +347,19 @@
 
           const bundleNote = document.createElement("p");
           bundleNote.className = "bundle-note";
-          bundleNote.textContent = `Extract the ZIP at the M8 SD card root. It already contains Bundles/${bundle.project_name}/, so the song and samples land in the folder M8 expects.`;
+          bundleNote.textContent = bundleNoteText(projects);
 
           const fileList = document.createElement("details");
           fileList.className = "file-list";
           const fileSummary = document.createElement("summary");
-          fileSummary.textContent = `Individual files (${outputFiles.length})`;
+          fileSummary.textContent = `Output files (${outputFiles.length})`;
           const fileItems = document.createElement("ul");
           fileList.append(fileSummary, fileItems);
 
           for (const output of outputFiles) {
             const blob = new Blob([output.bytes], { type: output.mime_type });
             const link = document.createElement("a");
-            link.href = URL.createObjectURL(blob);
+            link.href = objectUrl(blob);
             link.download = output.path;
             link.textContent = output.path;
             link.title = output.path;
@@ -315,14 +370,149 @@
 
           downloads.classList.add("has-results");
           downloads.append(actions, bundleNote, fileList);
-          report.textContent = JSON.stringify(bundle.report, null, 2);
+          report.textContent = JSON.stringify(batchReport, null, 2);
+          completedStatus = statusText(batchReport);
         } catch (error) {
           report.textContent = String(error);
         } finally {
           busy = false;
           refreshButton();
+          if (completedStatus) {
+            status.textContent = completedStatus;
+          }
         }
       });
+
+      function syncSongName() {
+        const files = selectedFiles();
+        if (files.length === 1) {
+          songName.disabled = false;
+          if (autoSongName || !songName.value.trim()) {
+            songName.value = fileBaseName(files[0].name);
+            autoSongName = true;
+          }
+        } else {
+          songName.disabled = files.length > 1;
+          if (files.length > 1) {
+            songName.value = "";
+            autoSongName = true;
+          }
+        }
+      }
+
+      function fileLabel(files) {
+        if (files.length === 1) return files[0].name;
+        const names = files.slice(0, 3).map((file) => file.name).join(", ");
+        return files.length > 3 ? `${files.length} files: ${names}, ...` : `${files.length} files: ${names}`;
+      }
+
+      function fileBaseName(name) {
+        const withoutPath = name.split(/[\\/]/).pop() || name;
+        return withoutPath.replace(/\.[^.]+$/, "") || "converted_tracker";
+      }
+
+      function sanitizeProjectName(name) {
+        const sanitized = Array.from(name)
+          .map((char) => /[A-Za-z0-9_-]/.test(char) ? char : "_")
+          .join("")
+          .replace(/^_+|_+$/g, "")
+          .slice(0, 32);
+        return sanitized || "converted_tracker";
+      }
+
+      function uniqueProjectName(name, usedProjectNames) {
+        const base = sanitizeProjectName(name);
+        let candidate = base;
+        let suffix = 2;
+        while (usedProjectNames.has(candidate)) {
+          const suffixText = `_${suffix}`;
+          candidate = `${base.slice(0, 32 - suffixText.length)}${suffixText}`;
+          suffix += 1;
+        }
+        usedProjectNames.add(candidate);
+        return candidate;
+      }
+
+      function decodeBundleFile(output) {
+        return {
+          ...output,
+          bytes: Uint8Array.from(atob(output.data_base64), (char) => char.charCodeAt(0)),
+        };
+      }
+
+      function projectReport(inputFile, bundle, outputFiles, status) {
+        const sampleFiles = outputFiles.filter((file) => file.path.includes("/Samples/")).length;
+        return {
+          input_file: inputFile.name,
+          song_name: bundle.project_name,
+          status,
+          source: bundle.report.source,
+          m8: bundle.report.m8,
+          notes: bundle.report.notes,
+          output_file_count: outputFiles.length,
+          output_size_bytes: outputFiles.reduce((sum, file) => sum + file.size, 0),
+          sample_files: sampleFiles,
+          output_files: outputFiles.map(({ path, mime_type, size }) => ({ path, mime_type, size })),
+        };
+      }
+
+      function buildBatchReport(projects, outputFiles) {
+        const converted = projects.filter((project) => project.status === "converted");
+        const failed = projects.filter((project) => project.status === "failed");
+        return {
+          generated_by: "m8convert",
+          build: buildStamp,
+          selected_files: projects.length,
+          converted_files: converted.length,
+          failed_files: failed.length,
+          output_file_count: outputFiles.length,
+          sample_file_count: converted.reduce((sum, project) => sum + project.sample_files, 0),
+          output_size_bytes: outputFiles.reduce((sum, file) => sum + file.size, 0),
+          projects,
+        };
+      }
+
+      function zipFileName(projects) {
+        const converted = projects.filter((project) => project.status === "converted");
+        if (converted.length === 1 && projects.length === 1) {
+          return `${converted[0].song_name || "m8convert-bundle"}.zip`;
+        }
+        return "m8convert-batch.zip";
+      }
+
+      function bundleNoteText(projects) {
+        const converted = projects.filter((project) => project.status === "converted");
+        if (converted.length === 1) {
+          return `Extract the ZIP at the M8 SD card root. It already contains Bundles/${converted[0].song_name}/, so the song and samples land in the folder M8 expects.`;
+        }
+        return "Extract the ZIP at the M8 SD card root. It already contains one Bundles/<ProjectName>/ folder for each converted tracker, plus m8convert-batch-report.json.";
+      }
+
+      function statusText(batchReport) {
+        if (batchReport.failed_files > 0) {
+          return `${batchReport.converted_files}/${batchReport.selected_files} converted, ${batchReport.failed_files} failed.`;
+        }
+        return `${batchReport.converted_files}/${batchReport.selected_files} converted.`;
+      }
+
+      function objectUrl(blob) {
+        const url = URL.createObjectURL(blob);
+        activeUrls.push(url);
+        return url;
+      }
+
+      function clearDownloads() {
+        for (const url of activeUrls) {
+          URL.revokeObjectURL(url);
+        }
+        activeUrls = [];
+        downloads.replaceChildren();
+        downloads.classList.remove("has-results");
+      }
+
+      function nextFrame() {
+        return new Promise((resolve) => requestAnimationFrame(resolve));
+      }
 
       function createZip(files) {
         const localParts = [];
