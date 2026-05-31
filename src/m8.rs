@@ -16,6 +16,12 @@ const TEMPLATE: &[u8] = include_bytes!("../assets/templates/V6_2EMPTY.m8s");
 const M8_TRACKS: usize = 8;
 const M8_PHRASE_ROWS: usize = 16;
 const EMPTY: u8 = 0xff;
+const FX_ARP: u8 = 0x00;
+const FX_DEL: u8 = 0x02;
+const FX_KIL: u8 = 0x05;
+const FX_TPO: u8 = 0x18;
+const FX_SAMPLER_STA: u8 = 0x84;
+const FX_SAMPLER_PAN: u8 = 0x8d;
 
 #[derive(Debug, Error)]
 pub enum M8Error {
@@ -82,6 +88,7 @@ pub fn export_editable_m8(
     clear_song(&mut song);
     install_sampler_instruments(&mut song, module);
 
+    let timing_fx = mod_timing_fx(module);
     let mut phrase_cache: HashMap<[PackedStep; M8_PHRASE_ROWS], u8> = HashMap::new();
     let mut chain_cache: HashMap<[u8; 4], u8> = HashMap::new();
     let mut next_phrase = 0u8;
@@ -115,6 +122,7 @@ pub fn export_editable_m8(
                         *pattern_id,
                         row,
                         channel,
+                        timing_fx.get(&(order_index, row, channel)).copied(),
                         &mut report,
                     );
                     packed[row_in_chunk] = pack_step(&step);
@@ -360,6 +368,7 @@ pub fn export_s3m_editable_m8(
     clear_song(&mut song);
     install_s3m_sampler_instruments(&mut song, module, &mut report);
 
+    let timing_fx = s3m_timing_fx(module);
     let mut phrase_cache: HashMap<[PackedStep; M8_PHRASE_ROWS], u8> = HashMap::new();
     let mut chain_cache: HashMap<[u8; 4], u8> = HashMap::new();
     let mut next_phrase = 0u8;
@@ -391,7 +400,8 @@ pub fn export_s3m_editable_m8(
                         order_index,
                         *pattern_id,
                         row,
-                        track,
+                        *source_channel,
+                        timing_fx.get(&(order_index, row, *source_channel)).copied(),
                         &mut report,
                     );
                     packed[row_in_chunk] = pack_step(&step);
@@ -612,21 +622,11 @@ fn convert_cell(
     pattern: u8,
     row: usize,
     channel: usize,
+    timing_tpo: Option<u8>,
     report: &mut M8Report,
 ) -> Step {
     if cell.sample_number > 0 {
         *current_instrument = cell.sample_number.saturating_sub(1);
-    }
-
-    if should_report_effect(cell) {
-        report.unsupported_effects.push(UnsupportedEffect {
-            order,
-            pattern,
-            row,
-            channel,
-            effect: cell.effect,
-            param: cell.effect_param,
-        });
     }
 
     let mut step = empty_step();
@@ -636,6 +636,17 @@ fn convert_cell(
         step.velocity = velocity_for_cell(module, cell, *current_instrument);
     } else if cell.effect == 0x0c {
         step.velocity = volume_to_velocity(cell.effect_param.min(64));
+    }
+
+    if !map_mod_effect(cell, timing_tpo, &mut step) && should_report_effect(cell) {
+        report.unsupported_effects.push(UnsupportedEffect {
+            order,
+            pattern,
+            row,
+            channel,
+            effect: cell.effect,
+            param: cell.effect_param,
+        });
     }
 
     step
@@ -700,22 +711,12 @@ fn convert_s3m_cell(
     pattern: u8,
     row: usize,
     channel: usize,
+    timing_tpo: Option<u8>,
     report: &mut M8Report,
 ) -> Step {
     if cell.instrument > 0 {
         *current_instrument = cell.instrument.saturating_sub(1);
     }
-    if cell.command != 0 {
-        report.unsupported_effects.push(UnsupportedEffect {
-            order,
-            pattern,
-            row,
-            channel,
-            effect: cell.command,
-            param: cell.info,
-        });
-    }
-
     let mut step = empty_step();
     if let Some(note) = s3m_note_to_m8(cell.note) {
         step.note = Note(note);
@@ -736,6 +737,17 @@ fn convert_s3m_cell(
         step.velocity = volume_to_velocity(cell.volume);
     }
 
+    if !map_s3m_effect(cell, timing_tpo, &mut step) && cell.command != 0 {
+        report.unsupported_effects.push(UnsupportedEffect {
+            order,
+            pattern,
+            row,
+            channel,
+            effect: cell.command,
+            param: cell.info,
+        });
+    }
+
     step
 }
 
@@ -745,6 +757,59 @@ fn should_report_effect(cell: Cell) -> bool {
     }
 
     !matches!(cell.effect, 0x0c)
+}
+
+fn map_mod_effect(cell: Cell, timing_tpo: Option<u8>, step: &mut Step) -> bool {
+    match cell.effect {
+        0x00 if cell.effect_param != 0 => push_fx(step, FX_ARP, cell.effect_param),
+        0x08 => push_fx(step, FX_SAMPLER_PAN, cell.effect_param),
+        0x09 => push_fx(step, FX_SAMPLER_STA, cell.effect_param),
+        0x0c => true,
+        0x0f => timing_tpo
+            .map(|tempo| push_fx(step, FX_TPO, tempo))
+            .unwrap_or(false),
+        0x0e => match cell.effect_param >> 4 {
+            0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.effect_param & 0x0f) * 17),
+            0x0c => push_fx(step, FX_KIL, cell.effect_param & 0x0f),
+            0x0d => push_fx(step, FX_DEL, cell.effect_param & 0x0f),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn map_s3m_effect(cell: S3mCell, timing_tpo: Option<u8>, step: &mut Step) -> bool {
+    match cell.command {
+        0 => true,
+        1 | 20 => timing_tpo
+            .map(|tempo| push_fx(step, FX_TPO, tempo))
+            .unwrap_or(false),
+        10 => push_fx(step, FX_ARP, cell.info),
+        15 => push_fx(step, FX_SAMPLER_STA, cell.info),
+        19 => match cell.info >> 4 {
+            0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.info & 0x0f) * 17),
+            0x0c => push_fx(step, FX_KIL, cell.info & 0x0f),
+            0x0d => push_fx(step, FX_DEL, cell.info & 0x0f),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn push_fx(step: &mut Step, command: u8, value: u8) -> bool {
+    let fx = FX { command, value };
+    if step.fx1.is_empty() {
+        step.fx1 = fx;
+        true
+    } else if step.fx2.is_empty() {
+        step.fx2 = fx;
+        true
+    } else if step.fx3.is_empty() {
+        step.fx3 = fx;
+        true
+    } else {
+        false
+    }
 }
 
 fn velocity_for_cell(module: &Module, cell: Cell, instrument: u8) -> u8 {
@@ -872,10 +937,73 @@ fn mod_m8_tempo(module: &Module) -> f32 {
     tracker_rows_to_m8_bpm(speed, tempo)
 }
 
+fn mod_timing_fx(module: &Module) -> HashMap<(usize, usize, usize), u8> {
+    let mut out = HashMap::new();
+    let mut speed = 6;
+    let mut tempo = 125;
+
+    for (order_index, pattern_id) in module.orders.iter().enumerate() {
+        let Some(pattern) = module.patterns.get(*pattern_id as usize) else {
+            continue;
+        };
+        for (row_index, row) in pattern.rows.iter().enumerate() {
+            for (channel, cell) in row.iter().take(module.channel_count).enumerate() {
+                if cell.effect == 0x0f && cell.effect_param != 0 {
+                    if cell.effect_param <= 32 {
+                        speed = cell.effect_param;
+                    } else {
+                        tempo = cell.effect_param;
+                    }
+                    out.insert(
+                        (order_index, row_index, channel),
+                        tracker_rows_to_m8_tpo(speed, tempo),
+                    );
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn s3m_timing_fx(module: &S3mModule) -> HashMap<(usize, usize, usize), u8> {
+    let mut out = HashMap::new();
+    let mut speed = module.initial_speed;
+    let mut tempo = module.initial_tempo;
+
+    for (order_index, pattern_id) in module.orders.iter().enumerate() {
+        let Some(pattern) = module.patterns.get(*pattern_id as usize) else {
+            continue;
+        };
+        for (row_index, row) in pattern.rows.iter().enumerate() {
+            for source_channel in &module.active_channels {
+                let cell = row[*source_channel];
+                match cell.command {
+                    1 if cell.info != 0 => speed = cell.info,
+                    20 if cell.info != 0 => tempo = cell.info,
+                    _ => continue,
+                }
+                out.insert(
+                    (order_index, row_index, *source_channel),
+                    tracker_rows_to_m8_tpo(speed, tempo),
+                );
+            }
+        }
+    }
+
+    out
+}
+
 fn tracker_rows_to_m8_bpm(speed: u8, tempo: u8) -> f32 {
     let speed = speed.max(1) as f32;
     let tempo = tempo.max(32) as f32;
     (tempo * 6.0 / speed).clamp(20.0, 999.0)
+}
+
+fn tracker_rows_to_m8_tpo(speed: u8, tempo: u8) -> u8 {
+    tracker_rows_to_m8_bpm(speed, tempo)
+        .round()
+        .clamp(20.0, 255.0) as u8
 }
 
 fn patch_header(
