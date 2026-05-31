@@ -20,10 +20,11 @@ const FX_ARP: u8 = 0x00;
 const FX_DEL: u8 = 0x02;
 const FX_KIL: u8 = 0x05;
 const FX_RET: u8 = 0x08;
+const FX_PSL: u8 = 0x0c;
+const FX_PBN: u8 = 0x0d;
 const FX_PVB: u8 = 0x0e;
 const FX_TBL: u8 = 0x14;
 const FX_TPO: u8 = 0x18;
-const FX_SAMPLER_FIN: u8 = 0x82;
 const FX_SAMPLER_STA: u8 = 0x84;
 const FX_SAMPLER_PAN: u8 = 0x8d;
 const FX_WAVSYNTH_OSC: u8 = 0x83;
@@ -92,7 +93,6 @@ struct TimingContext {
 enum TableSpec {
     Empty,
     VolumeSlide { start: u8, delta: i8, rows: u8 },
-    FineSlide { delta: i8, rows: u8 },
 }
 
 struct TableAllocator {
@@ -458,6 +458,7 @@ pub fn export_editable_m8(
     let mut pitch_slide_memory = vec![PitchSlideMemory::default(); module.channel_count];
     let mut tone_portamento = vec![TonePortamentoState::default(); module.channel_count];
     let mut active_table_effects = vec![false; module.channel_count];
+    let mut active_pitch_bends = vec![false; module.channel_count];
 
     for (playback_index, block) in playback_blocks.iter().enumerate() {
         let Some(pattern) = module.patterns.get(block.pattern_id as usize) else {
@@ -505,6 +506,7 @@ pub fn export_editable_m8(
                         &mut pitch_slide_memory[channel],
                         &mut tone_portamento[channel],
                         &mut active_table_effects[channel],
+                        &mut active_pitch_bends[channel],
                         &mut report,
                     );
                     packed[row_in_chunk] = pack_step(&step);
@@ -774,6 +776,7 @@ pub fn export_s3m_editable_m8(
         .map(|channel| module.channel_pans.get(*channel).copied().unwrap_or(0x80))
         .collect::<Vec<_>>();
     let mut active_table_effects = vec![false; module.active_channels.len()];
+    let mut active_pitch_bends = vec![false; module.active_channels.len()];
 
     for (playback_index, block) in playback_blocks.iter().enumerate() {
         let Some(pattern) = module.patterns.get(block.pattern_id as usize) else {
@@ -825,6 +828,7 @@ pub fn export_s3m_editable_m8(
                         &mut tone_portamento[track],
                         &mut current_pans[track],
                         &mut active_table_effects[track],
+                        &mut active_pitch_bends[track],
                         &mut report,
                     );
                     packed[row_in_chunk] = pack_step(&step);
@@ -1113,6 +1117,7 @@ fn convert_cell(
     pitch_slide_memory: &mut PitchSlideMemory,
     tone_portamento: &mut TonePortamentoState,
     active_table_effect: &mut bool,
+    active_pitch_bend: &mut bool,
     report: &mut M8Report,
 ) -> Step {
     if cell.sample_number > 0 {
@@ -1122,6 +1127,7 @@ fn convert_cell(
     let mut step = empty_step();
     if let Some(note) = period_to_note(cell.period) {
         if is_mod_tone_portamento(cell) {
+            step.note = Note(note);
             tone_portamento.target_note = Some(note);
         } else {
             tone_portamento.current_note = Some(note);
@@ -1143,6 +1149,7 @@ fn convert_cell(
     }
 
     let mut used_table_effect = false;
+    let mut used_pitch_bend = false;
     let mapped = map_mod_effect(
         cell,
         timing,
@@ -1155,7 +1162,9 @@ fn convert_cell(
         pitch_slide_memory,
         tone_portamento,
         &mut used_table_effect,
+        &mut used_pitch_bend,
     );
+    update_active_pitch_bend(&mut step, used_pitch_bend, active_pitch_bend);
     update_active_table_effect(
         &mut step,
         table_allocator,
@@ -1237,16 +1246,8 @@ fn convert_hvl_step(
 fn map_hvl_track_effect(command: u8, param: u8, step: &mut Step) -> bool {
     match command {
         0 => true,
-        0x01 => push_fx(
-            step,
-            FX_SAMPLER_FIN,
-            relative_fx_value(positive_delta(param)),
-        ),
-        0x02 => push_fx(
-            step,
-            FX_SAMPLER_FIN,
-            relative_fx_value(negative_delta(param)),
-        ),
+        0x01 => push_fx(step, FX_PBN, pitch_bend_value(param, true)),
+        0x02 => push_fx(step, FX_PBN, pitch_bend_value(param, false)),
         0x04 => push_fx(step, FX_PVB, param),
         0x0c => {
             step.velocity = volume_to_velocity(param.min(64));
@@ -1276,6 +1277,7 @@ fn convert_s3m_cell(
     tone_portamento: &mut TonePortamentoState,
     current_pan: &mut u8,
     active_table_effect: &mut bool,
+    active_pitch_bend: &mut bool,
     report: &mut M8Report,
 ) -> Step {
     if cell.instrument > 0 {
@@ -1288,7 +1290,6 @@ fn convert_s3m_cell(
             return step;
         }
         if is_s3m_tone_portamento(cell) {
-            step.note = Note::default();
             tone_portamento.target_note = Some(note);
         } else {
             tone_portamento.current_note = Some(note);
@@ -1317,6 +1318,7 @@ fn convert_s3m_cell(
     }
 
     let mut used_table_effect = false;
+    let mut used_pitch_bend = false;
     let mapped = map_s3m_effect(
         cell,
         timing,
@@ -1330,7 +1332,9 @@ fn convert_s3m_cell(
         tone_portamento,
         current_pan,
         &mut used_table_effect,
+        &mut used_pitch_bend,
     );
+    update_active_pitch_bend(&mut step, used_pitch_bend, active_pitch_bend);
     update_active_table_effect(
         &mut step,
         table_allocator,
@@ -1383,6 +1387,21 @@ fn update_active_table_effect(
     }
 }
 
+fn update_active_pitch_bend(step: &mut Step, used_pitch_bend: bool, active_pitch_bend: &mut bool) {
+    if used_pitch_bend {
+        *active_pitch_bend = true;
+        return;
+    }
+
+    if !*active_pitch_bend {
+        return;
+    }
+
+    if push_fx(step, FX_PBN, 0) {
+        *active_pitch_bend = false;
+    }
+}
+
 fn map_mod_effect(
     cell: Cell,
     timing: TimingContext,
@@ -1395,49 +1414,28 @@ fn map_mod_effect(
     pitch_slide_memory: &mut PitchSlideMemory,
     tone_portamento: &mut TonePortamentoState,
     used_table_effect: &mut bool,
+    used_pitch_bend: &mut bool,
 ) -> bool {
     match cell.effect {
         0x00 if cell.effect_param != 0 => push_fx(step, FX_ARP, cell.effect_param),
         0x01 => map_pitch_slide(
             step,
-            table_allocator,
-            tables,
             cell.effect_param,
-            timing.speed,
             true,
             pitch_slide_memory,
-            used_table_effect,
+            used_pitch_bend,
         ),
         0x02 => map_pitch_slide(
             step,
-            table_allocator,
-            tables,
             cell.effect_param,
-            timing.speed,
             false,
             pitch_slide_memory,
-            used_table_effect,
+            used_pitch_bend,
         ),
-        0x03 => map_tone_portamento(
-            step,
-            table_allocator,
-            tables,
-            cell.effect_param,
-            timing.speed,
-            tone_portamento,
-            used_table_effect,
-        ),
+        0x03 => map_tone_portamento(step, cell.effect_param, timing.speed, tone_portamento),
         0x04 => map_vibrato(step, cell.effect_param, vibrato_memory),
         0x05 => {
-            let tone_mapped = map_tone_portamento(
-                step,
-                table_allocator,
-                tables,
-                0,
-                timing.speed,
-                tone_portamento,
-                used_table_effect,
-            );
+            let tone_mapped = map_tone_portamento(step, 0, timing.speed, tone_portamento);
             let start = if step.velocity == EMPTY {
                 *current_velocity
             } else {
@@ -1503,16 +1501,8 @@ fn map_mod_effect(
             .map(|tempo| push_fx(step, FX_TPO, tempo))
             .unwrap_or(false),
         0x0e => match cell.effect_param >> 4 {
-            0x01 => push_fx(
-                step,
-                FX_SAMPLER_FIN,
-                relative_fx_value(positive_delta(cell.effect_param & 0x0f)),
-            ),
-            0x02 => push_fx(
-                step,
-                FX_SAMPLER_FIN,
-                relative_fx_value(negative_delta(cell.effect_param & 0x0f)),
-            ),
+            0x01 => push_pitch_bend(step, cell.effect_param & 0x0f, true, used_pitch_bend),
+            0x02 => push_pitch_bend(step, cell.effect_param & 0x0f, false, used_pitch_bend),
             0x06 | 0x0e => true,
             0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.effect_param & 0x0f) * 17),
             0x09 => push_fx(step, FX_RET, (cell.effect_param & 0x0f) << 4),
@@ -1539,6 +1529,7 @@ fn map_s3m_effect(
     tone_portamento: &mut TonePortamentoState,
     current_pan: &mut u8,
     used_table_effect: &mut bool,
+    used_pitch_bend: &mut bool,
 ) -> bool {
     match cell.command {
         0 => true,
@@ -1565,35 +1556,9 @@ fn map_s3m_effect(
                 used_table_effect,
             )
         }
-        5 => map_s3m_pitch_slide(
-            step,
-            table_allocator,
-            tables,
-            cell.info,
-            timing.speed,
-            false,
-            pitch_slide_memory,
-            used_table_effect,
-        ),
-        6 => map_s3m_pitch_slide(
-            step,
-            table_allocator,
-            tables,
-            cell.info,
-            timing.speed,
-            true,
-            pitch_slide_memory,
-            used_table_effect,
-        ),
-        7 => map_s3m_tone_portamento(
-            step,
-            table_allocator,
-            tables,
-            cell.info,
-            timing.speed,
-            tone_portamento,
-            used_table_effect,
-        ),
+        5 => map_s3m_pitch_slide(step, cell.info, false, pitch_slide_memory, used_pitch_bend),
+        6 => map_s3m_pitch_slide(step, cell.info, true, pitch_slide_memory, used_pitch_bend),
+        7 => map_s3m_tone_portamento(step, cell.info, timing.speed, tone_portamento),
         8 | 21 => map_vibrato(step, cell.info, vibrato_memory),
         10 => push_fx(step, FX_ARP, cell.info),
         11 => {
@@ -1617,15 +1582,7 @@ fn map_s3m_effect(
             vibrato_mapped && volume_mapped
         }
         12 => {
-            let tone_mapped = map_s3m_tone_portamento(
-                step,
-                table_allocator,
-                tables,
-                0,
-                timing.speed,
-                tone_portamento,
-                used_table_effect,
-            );
+            let tone_mapped = map_s3m_tone_portamento(step, 0, timing.speed, tone_portamento);
             let start = if step.velocity == EMPTY {
                 *current_velocity
             } else {
@@ -1718,13 +1675,10 @@ fn map_volume_slide(
 
 fn map_pitch_slide(
     step: &mut Step,
-    table_allocator: &mut TableAllocator,
-    tables: &mut [Table],
     amount: u8,
-    speed: u8,
     upward: bool,
     memory: &mut PitchSlideMemory,
-    used_table_effect: &mut bool,
+    used_pitch_bend: &mut bool,
 ) -> bool {
     let amount = if amount == 0 {
         if upward { memory.up } else { memory.down }
@@ -1740,36 +1694,15 @@ fn map_pitch_slide(
         return true;
     }
 
-    let rows = tracker_effect_rows(speed);
-    if rows == 0 {
-        return true;
-    }
-
-    map_table(
-        step,
-        table_allocator,
-        tables,
-        TableSpec::FineSlide {
-            delta: if upward {
-                positive_delta(amount)
-            } else {
-                negative_delta(amount)
-            },
-            rows,
-        },
-        used_table_effect,
-    )
+    push_pitch_bend(step, amount, upward, used_pitch_bend)
 }
 
 fn map_s3m_pitch_slide(
     step: &mut Step,
-    table_allocator: &mut TableAllocator,
-    tables: &mut [Table],
     amount: u8,
-    speed: u8,
     upward: bool,
     memory: &mut PitchSlideMemory,
-    used_table_effect: &mut bool,
+    used_pitch_bend: &mut bool,
 ) -> bool {
     let amount = if amount == 0 {
         if upward { memory.up } else { memory.down }
@@ -1785,47 +1718,31 @@ fn map_s3m_pitch_slide(
         return true;
     }
 
-    let Some((scaled_amount, rows)) = s3m_pitch_slide_shape(amount, speed) else {
+    let Some(scaled_amount) = s3m_pitch_bend_amount(amount) else {
         return true;
     };
-    if rows == 0 || scaled_amount == 0 {
+    if scaled_amount == 0 {
         return true;
     }
 
-    map_table(
-        step,
-        table_allocator,
-        tables,
-        TableSpec::FineSlide {
-            delta: if upward {
-                positive_delta(scaled_amount)
-            } else {
-                negative_delta(scaled_amount)
-            },
-            rows,
-        },
-        used_table_effect,
-    )
+    push_pitch_bend(step, scaled_amount, upward, used_pitch_bend)
 }
 
-fn s3m_pitch_slide_shape(amount: u8, speed: u8) -> Option<(u8, u8)> {
+fn s3m_pitch_bend_amount(amount: u8) -> Option<u8> {
     let high = amount >> 4;
     let low = amount & 0x0f;
     match high {
-        0x0e if low != 0 => Some((low, 1)),
-        0x0f if low != 0 => Some((low.saturating_mul(4), 1)),
-        _ => Some((amount.saturating_mul(4), tracker_effect_rows(speed))),
+        0x0e if low != 0 => Some(low),
+        0x0f if low != 0 => Some(low.saturating_mul(4)),
+        _ => Some(amount.saturating_mul(4)),
     }
 }
 
 fn map_tone_portamento(
     step: &mut Step,
-    table_allocator: &mut TableAllocator,
-    tables: &mut [Table],
     amount: u8,
     speed: u8,
     state: &mut TonePortamentoState,
-    used_table_effect: &mut bool,
 ) -> bool {
     if amount != 0 {
         state.speed = amount;
@@ -1840,43 +1757,22 @@ fn map_tone_portamento(
         return true;
     }
 
-    let rows = tracker_effect_rows(speed);
-    if rows == 0 {
-        return true;
+    let ticks = portamento_ticks(current_note, target_note, state.speed, speed);
+    let mapped = push_fx(step, FX_PSL, ticks);
+    if mapped {
+        state.current_note = Some(target_note);
     }
-    let delta = if target_note > current_note {
-        positive_delta(state.speed)
-    } else {
-        negative_delta(state.speed)
-    };
-    map_table(
-        step,
-        table_allocator,
-        tables,
-        TableSpec::FineSlide { delta, rows },
-        used_table_effect,
-    )
+    mapped
 }
 
 fn map_s3m_tone_portamento(
     step: &mut Step,
-    table_allocator: &mut TableAllocator,
-    tables: &mut [Table],
     amount: u8,
     speed: u8,
     state: &mut TonePortamentoState,
-    used_table_effect: &mut bool,
 ) -> bool {
     let scaled_amount = amount.saturating_mul(4);
-    map_tone_portamento(
-        step,
-        table_allocator,
-        tables,
-        scaled_amount,
-        speed,
-        state,
-        used_table_effect,
-    )
+    map_tone_portamento(step, scaled_amount, speed, state)
 }
 
 fn map_pan(step: &mut Step, pan: u8, current_pan: &mut u8) -> bool {
@@ -1901,20 +1797,36 @@ fn map_table(
     mapped
 }
 
+fn push_pitch_bend(step: &mut Step, amount: u8, upward: bool, used_pitch_bend: &mut bool) -> bool {
+    let mapped = push_fx(step, FX_PBN, pitch_bend_value(amount, upward));
+    if mapped {
+        *used_pitch_bend = true;
+    }
+    mapped
+}
+
+fn pitch_bend_value(amount: u8, upward: bool) -> u8 {
+    let amount = amount.min(0x7f);
+    if upward {
+        amount
+    } else {
+        0u8.wrapping_sub(amount)
+    }
+}
+
+fn portamento_ticks(current_note: u8, target_note: u8, speed: u8, _row_speed: u8) -> u8 {
+    let distance = current_note.abs_diff(target_note).max(1) as u16;
+    let speed = speed.max(1) as u16;
+    let ticks = (distance * 16).div_ceil(speed);
+    ticks.clamp(1, 0xff) as u8
+}
+
 fn positive_delta(value: u8) -> i8 {
     value.min(63) as i8
 }
 
 fn negative_delta(value: u8) -> i8 {
     -(value.min(63) as i8)
-}
-
-fn relative_fx_value(delta: i8) -> u8 {
-    if delta >= 0 {
-        delta as u8
-    } else {
-        0u8.wrapping_sub(delta.unsigned_abs())
-    }
 }
 
 fn map_vibrato(step: &mut Step, param: u8, vibrato_memory: &mut u8) -> bool {
@@ -1961,14 +1873,6 @@ fn build_table(table: &mut Table, spec: TableSpec) {
         TableSpec::VolumeSlide { start, delta, rows } => {
             for (index, step) in table.steps.iter_mut().take(rows as usize).enumerate() {
                 step.velocity = stepped_value(start, delta, index);
-            }
-        }
-        TableSpec::FineSlide { delta, rows } => {
-            for step in table.steps.iter_mut().take(rows as usize) {
-                step.fx1 = FX {
-                    command: FX_SAMPLER_FIN,
-                    value: relative_fx_value(delta),
-                };
             }
         }
     }
@@ -2390,10 +2294,12 @@ mod tests {
     }
 
     #[test]
-    fn s3m_pitch_slide_uses_st3_period_scale() {
-        assert_eq!(s3m_pitch_slide_shape(0x10, 3), Some((0x40, 2)));
-        assert_eq!(s3m_pitch_slide_shape(0xf2, 6), Some((0x08, 1)));
-        assert_eq!(s3m_pitch_slide_shape(0xe2, 6), Some((0x02, 1)));
+    fn s3m_pitch_slide_uses_m8_pitch_bend_scale() {
+        assert_eq!(s3m_pitch_bend_amount(0x10), Some(0x40));
+        assert_eq!(s3m_pitch_bend_amount(0xf2), Some(0x08));
+        assert_eq!(s3m_pitch_bend_amount(0xe2), Some(0x02));
+        assert_eq!(pitch_bend_value(0x08, true), 0x08);
+        assert_eq!(pitch_bend_value(0x08, false), 0xf8);
     }
 
     #[test]
