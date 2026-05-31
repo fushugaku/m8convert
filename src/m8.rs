@@ -131,6 +131,8 @@ struct PitchSlideMemory {
 struct TonePortamentoState {
     current_note: Option<u8>,
     target_note: Option<u8>,
+    current_period: Option<u16>,
+    target_period: Option<u16>,
     speed: u8,
 }
 
@@ -1269,9 +1271,12 @@ fn convert_cell(
         if is_mod_tone_portamento(cell) {
             step.note = Note(note);
             tone_portamento.target_note = Some(note);
+            tone_portamento.target_period = Some(cell.period);
         } else {
             tone_portamento.current_note = Some(note);
             tone_portamento.target_note = None;
+            tone_portamento.current_period = Some(cell.period);
+            tone_portamento.target_period = None;
             tone_portamento.speed = 0;
             pitch_slide_memory.up = 0;
             pitch_slide_memory.down = 0;
@@ -2009,20 +2014,40 @@ fn map_tone_portamento(
     if amount != 0 {
         state.speed = amount;
     }
-    let Some(current_note) = state.current_note else {
-        return true;
-    };
     let Some(target_note) = state.target_note else {
         return true;
     };
-    if current_note == target_note || state.speed == 0 {
+    if state.speed == 0 {
         return true;
     }
 
-    let ticks = portamento_ticks(current_note, target_note, state.speed, speed);
+    let ticks = if let (Some(current_period), Some(target_period)) =
+        (state.current_period, state.target_period)
+    {
+        if current_period == target_period {
+            state.current_note = Some(target_note);
+            state.current_period = Some(target_period);
+            return true;
+        }
+        period_portamento_ticks(current_period, target_period, state.speed)
+    } else {
+        let Some(current_note) = state.current_note else {
+            return true;
+        };
+        if current_note == target_note {
+            return true;
+        }
+        note_portamento_ticks(current_note, target_note, state.speed, speed)
+    };
+
+    if ticks == 0 {
+        return true;
+    }
+
     let mapped = push_fx(step, FX_PSL, ticks);
     if mapped {
         state.current_note = Some(target_note);
+        state.current_period = state.target_period;
     }
     mapped
 }
@@ -2092,7 +2117,13 @@ fn pitch_bend_value(amount: u8, upward: bool) -> u8 {
     }
 }
 
-fn portamento_ticks(current_note: u8, target_note: u8, speed: u8, _row_speed: u8) -> u8 {
+fn period_portamento_ticks(current_period: u16, target_period: u16, speed: u8) -> u8 {
+    let distance = current_period.abs_diff(target_period).max(1);
+    let speed = speed.max(1) as u16;
+    distance.div_ceil(speed).clamp(1, 0xff) as u8
+}
+
+fn note_portamento_ticks(current_note: u8, target_note: u8, speed: u8, _row_speed: u8) -> u8 {
     let distance = current_note.abs_diff(target_note).max(1) as u16;
     let speed = speed.max(1) as u16;
     let ticks = (distance * 16).div_ceil(speed);
@@ -2677,6 +2708,23 @@ mod tests {
     fn s3m_table_tick_stretches_fast_tracker_speeds() {
         assert_eq!(s3m_table_tick(3), 2);
         assert_eq!(s3m_table_tick(6), 1);
+    }
+
+    #[test]
+    fn mod_tone_portamento_uses_period_distance() {
+        let mut step = empty_step();
+        let mut state = TonePortamentoState {
+            current_note: Some(15),
+            target_note: Some(12),
+            current_period: Some(360),
+            target_period: Some(428),
+            speed: 0,
+        };
+
+        assert!(map_tone_portamento(&mut step, 0x0f, 3, &mut state));
+        assert_eq!(step.fx1.command, FX_PSL);
+        assert_eq!(step.fx1.value, 5);
+        assert_eq!(state.current_period, Some(428));
     }
 
     #[test]
