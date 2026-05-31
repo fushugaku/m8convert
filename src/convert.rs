@@ -112,9 +112,9 @@ pub fn convert_mod(
         source: source_report(&module),
         m8: m8_export.report,
         notes: vec![
-            "Editable conversion simulates MOD pattern flow, maps playback rows to M8 song rows, MOD channels to M8 tracks, and MOD rows to phrases/chains.".to_string(),
-            "Samples are exported as unsigned 8-bit mono WAV files with loop metadata when present; M8 song files reference those external samples.".to_string(),
-            "ProTracker tick effects are mapped to phrase FX or short M8 tables where possible, including slides, vibrato, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
+            "Editable conversion simulates MOD pattern flow, maps playback rows to M8 song rows, MOD channels to M8 tracks, and writes M8 SNG hops for detected playback loops/restart positions where possible.".to_string(),
+            "Samples are exported as unsigned 8-bit mono WAV files with loop metadata, loop end, and MOD finetune mapped into M8 sampler parameters when present.".to_string(),
+            "ProTracker tick effects are mapped to phrase FX or short M8 tables where possible, including slides, vibrato, tremolo, retrigger, and finetune/pan subcommands; remaining commands are listed in unsupported_effects.".to_string(),
         ],
     };
 
@@ -161,8 +161,8 @@ pub fn convert_hvl(
         m8: m8_export.report,
         notes: vec![
             "Experimental editable HVL conversion maps positions to M8 song rows, HVL tracks to chains/phrases, and HVL notes to M8 notes.".to_string(),
-            "HVL instruments are synthesized; this converter approximates them as M8 WavSynth patches and maps the first performance-list steps to M8 tables where possible.".to_string(),
-            "HVL track commands are mapped for safe pitch, vibrato, volume, and speed cases; remaining commands are listed in unsupported_effects/warnings.".to_string(),
+            "HVL instruments are synthesized; this converter approximates them as M8 WavSynth patches, maps envelopes/vibrato into modulators, and maps performance-list commands to M8 tables where possible.".to_string(),
+            "HVL track commands are mapped for safe pitch, vibrato, volume, speed, and restart-loop cases; remaining commands are listed in unsupported_effects/warnings.".to_string(),
         ],
     };
 
@@ -222,9 +222,9 @@ pub fn convert_s3m(
         source: s3m_source_report(&module),
         m8: m8_export.report,
         notes: vec![
-            "Experimental editable S3M conversion simulates pattern flow, maps playback rows to M8 song rows, enabled S3M channels to M8 tracks, and packed pattern rows to phrases/chains.".to_string(),
-            "PCM instruments are exported as mono WAV files at each S3M instrument's C2SPD rate so M8 transposition starts from the same C-4 tuning; AdLib/OPL instruments are reported and skipped.".to_string(),
-            "S3M tick effects are mapped to M8 phrase FX or short tables where possible, including pitch bend, portamento, vibrato, panning, speed-aware volume slides, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
+            "Experimental editable S3M conversion simulates pattern flow, maps playback rows to M8 song rows, enabled S3M channels to M8 tracks, and writes M8 SNG hops for detected playback loops where possible.".to_string(),
+            "PCM instruments are exported as mono WAV files at each S3M instrument's C2SPD rate with loop metadata/loop end so M8 transposition starts from the same C-4 tuning; AdLib/OPL instruments are reported and skipped.".to_string(),
+            "S3M tick effects are mapped to M8 phrase FX or short tables where possible, including pitch bend, portamento, vibrato, tremor/tremolo, panning, speed-aware volume slides, global volume, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
         ],
     };
 

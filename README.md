@@ -14,7 +14,7 @@ The converter currently emits:
 
 MOD, HVL, S3M, and M8 are all trackers, but their sequencing and instrument models are not identical. A MOD/S3M pattern has 64 rows per channel; HVL has positions that reference reusable tracks plus synthetic instruments; M8 uses song rows, chains, 16-step phrases, and tables for tick-time behavior. Large source modules can exceed M8's 255 phrase / 255 chain limits, and some tracker effects still need deliberate translation.
 
-This project does not silently pretend those conversions are exact. Notes, instruments, volumes, pattern flow, sample data, sample loops, tempo, panning, direct effects, slides, vibrato, and retrigger effects are exported where M8 has a compatible representation; unsupported effects are preserved in the JSON report so the next pass can map them deliberately.
+This project does not silently pretend those conversions are exact. Notes, instruments, volumes, pattern flow, restart/loop hops, sample data, sample loops, loop end, MOD finetune, tempo, panning, direct effects, slides, vibrato, tremor/tremolo, and retrigger effects are exported where M8 has a compatible representation; unsupported effects are preserved in the JSON report so the next pass can map them deliberately.
 
 ## CLI
 

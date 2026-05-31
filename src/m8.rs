@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use m8_file_parser::{
-    AHDEnv, Chain, ChainStep, FX, Instrument, LimitType, Note, Phrase, SamplePlayMode, Sampler,
-    Song, Step, SynthParams, Table, WavShape, WavSynth, reader::Reader, writer::Writer,
+    AHDEnv, Chain, ChainStep, FX, Instrument, LFO, LfoShape, LfoTriggerMode, LimitType, Note,
+    Phrase, SamplePlayMode, Sampler, Song, Step, SynthParams, Table, WavShape, WavSynth,
+    reader::Reader, writer::Writer,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,9 +24,11 @@ const FX_RET: u8 = 0x08;
 const FX_PSL: u8 = 0x0c;
 const FX_PBN: u8 = 0x0d;
 const FX_PVB: u8 = 0x0e;
+const FX_SNG: u8 = 0x13;
 const FX_TBL: u8 = 0x14;
 const FX_TIC: u8 = 0x16;
 const FX_TPO: u8 = 0x18;
+const FX_SAMPLER_FIN: u8 = 0x82;
 const FX_SAMPLER_STA: u8 = 0x84;
 const FX_SAMPLER_PAN: u8 = 0x8d;
 const FX_WAVSYNTH_OSC: u8 = 0x83;
@@ -93,7 +96,23 @@ struct TimingContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TableSpec {
     Empty,
-    VolumeSlide { start: u8, delta: i8, rows: u8 },
+    VolumeSlide {
+        start: u8,
+        delta: i8,
+        rows: u8,
+    },
+    Tremor {
+        velocity: u8,
+        on: u8,
+        off: u8,
+        rows: u8,
+    },
+    Tremolo {
+        center: u8,
+        depth: u8,
+        speed: u8,
+        rows: u8,
+    },
 }
 
 struct TableAllocator {
@@ -120,6 +139,7 @@ struct PlaybackBlock {
     order_index: usize,
     pattern_id: u8,
     rows: Vec<PlaybackRow>,
+    song_hop: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -172,11 +192,12 @@ impl TableAllocator {
 }
 
 fn build_mod_playback_blocks(module: &Module, report: &mut M8Report) -> Vec<PlaybackBlock> {
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<PlaybackBlock> = Vec::new();
     let mut order_index = 0usize;
     let mut start_row = 0usize;
     let mut visits = 0usize;
     let mut seen_entries: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut entry_song_rows: HashMap<(usize, usize), u8> = HashMap::new();
     let mut loop_start = vec![0usize; module.channel_count];
     let mut loop_counts: HashMap<(usize, usize, usize), u8> = HashMap::new();
 
@@ -184,14 +205,21 @@ fn build_mod_playback_blocks(module: &Module, report: &mut M8Report) -> Vec<Play
         && blocks.len() < MAX_PLAYBACK_BLOCKS
         && visits < MAX_FLOW_VISITS
     {
-        let seen = seen_entries.entry((order_index, start_row)).or_default();
+        let entry = (order_index, start_row);
+        if let Some(target_song_row) = entry_song_rows.get(&entry).copied()
+            && let Some(block) = blocks.last_mut()
+        {
+            block.song_hop = Some(target_song_row);
+        }
+        let seen = seen_entries.entry(entry).or_default();
         if *seen > 0 {
             report.warnings.push(format!(
-                "MOD playback flow loops back to order {order_index}, row {start_row}; exported one linear pass"
+                "MOD playback flow loops back to order {order_index}, row {start_row}; inserted M8 SNG hop"
             ));
             break;
         }
         *seen += 1;
+        entry_song_rows.entry(entry).or_insert(blocks.len() as u8);
 
         let pattern_id = module.orders[order_index];
         let Some(pattern) = module.patterns.get(pattern_id as usize) else {
@@ -254,6 +282,17 @@ fn build_mod_playback_blocks(module: &Module, report: &mut M8Report) -> Vec<Play
         start_row = next_start_row;
     }
 
+    if let Some(restart_song_row) = mod_restart_song_row(module, &entry_song_rows)
+        && let Some(block) = blocks.last_mut()
+        && block.song_hop.is_none()
+    {
+        block.song_hop = Some(restart_song_row);
+        report.warnings.push(format!(
+            "MOD restart position {} was mapped to M8 SNG hop row {}",
+            module.restart_position, restart_song_row
+        ));
+    }
+
     if blocks.len() >= MAX_PLAYBACK_BLOCKS {
         report
             .warnings
@@ -263,11 +302,12 @@ fn build_mod_playback_blocks(module: &Module, report: &mut M8Report) -> Vec<Play
 }
 
 fn build_s3m_playback_blocks(module: &S3mModule, report: &mut M8Report) -> Vec<PlaybackBlock> {
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<PlaybackBlock> = Vec::new();
     let mut order_index = 0usize;
     let mut start_row = 0usize;
     let mut visits = 0usize;
     let mut seen_entries: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut entry_song_rows: HashMap<(usize, usize), u8> = HashMap::new();
     let mut loop_start = vec![0usize; 32];
     let mut loop_counts: HashMap<(usize, usize, usize), u8> = HashMap::new();
 
@@ -275,14 +315,21 @@ fn build_s3m_playback_blocks(module: &S3mModule, report: &mut M8Report) -> Vec<P
         && blocks.len() < MAX_PLAYBACK_BLOCKS
         && visits < MAX_FLOW_VISITS
     {
-        let seen = seen_entries.entry((order_index, start_row)).or_default();
+        let entry = (order_index, start_row);
+        if let Some(target_song_row) = entry_song_rows.get(&entry).copied()
+            && let Some(block) = blocks.last_mut()
+        {
+            block.song_hop = Some(target_song_row);
+        }
+        let seen = seen_entries.entry(entry).or_default();
         if *seen > 0 {
             report.warnings.push(format!(
-                "S3M playback flow loops back to order {order_index}, row {start_row}; exported one linear pass"
+                "S3M playback flow loops back to order {order_index}, row {start_row}; inserted M8 SNG hop"
             ));
             break;
         }
         *seen += 1;
+        entry_song_rows.entry(entry).or_insert(blocks.len() as u8);
 
         let pattern_id = module.orders[order_index];
         let Some(pattern) = module.patterns.get(pattern_id as usize) else {
@@ -417,8 +464,20 @@ fn push_playback_rows(
             order_index,
             pattern_id,
             rows: chunk.to_vec(),
+            song_hop: None,
         });
     }
+}
+
+fn mod_restart_song_row(
+    module: &Module,
+    entry_song_rows: &HashMap<(usize, usize), u8>,
+) -> Option<u8> {
+    let restart = module.restart_position as usize;
+    if restart == 0 || restart >= module.orders.len() {
+        return None;
+    }
+    entry_song_rows.get(&(restart, 0)).copied()
 }
 
 fn bcd_row(value: u8) -> usize {
@@ -487,7 +546,7 @@ pub fn export_editable_m8(
                     } else {
                         silent_mod_cell()
                     };
-                    let step = convert_cell(
+                    let mut step = convert_cell(
                         module,
                         cell,
                         &mut current_instruments[channel],
@@ -510,6 +569,12 @@ pub fn export_editable_m8(
                         &mut active_pitch_bends[channel],
                         &mut report,
                     );
+                    if channel == 0
+                        && chunk * M8_PHRASE_ROWS + row_in_chunk + 1 == block.rows.len()
+                        && let Some(song_hop) = block.song_hop
+                    {
+                        push_song_hop(&mut step, song_hop, &mut report, "MOD");
+                    }
                     packed[row_in_chunk] = pack_step(&step);
                     phrase.steps[row_in_chunk] = step;
                 }
@@ -576,13 +641,6 @@ pub fn export_editable_m8(
                 .to_string(),
         );
     }
-    if module.samples.iter().any(|sample| sample.finetune != 0) {
-        report.warnings.push(
-            "MOD finetune values are reported but not pitch-calibrated in the M8 sampler yet"
-                .to_string(),
-        );
-    }
-
     let mut writer = Writer::new(template);
     song.write(&mut writer).map_err(M8Error::Write)?;
     let mut song_bytes = writer.finish();
@@ -642,7 +700,7 @@ pub fn export_hvl_editable_m8(
                 for row_in_chunk in 0..M8_PHRASE_ROWS {
                     let row = chunk * M8_PHRASE_ROWS + row_in_chunk;
                     let source = track.rows.get(row).copied().unwrap_or_else(empty_hvl_step);
-                    let step = convert_hvl_step(
+                    let mut step = convert_hvl_step(
                         module,
                         source,
                         transpose,
@@ -653,6 +711,18 @@ pub fn export_hvl_editable_m8(
                         &hvl_table_ids,
                         &mut report,
                     );
+                    if channel == 0
+                        && position_index + 1 == module.positions.len()
+                        && row + 1 == module.track_length
+                        && (module.restart_position as usize) < module.positions.len()
+                    {
+                        push_song_hop(
+                            &mut step,
+                            module.restart_position.min(0xff) as u8,
+                            &mut report,
+                            "HVL",
+                        );
+                    }
                     packed[row_in_chunk] = pack_step(&step);
                     phrase.steps[row_in_chunk] = step;
                 }
@@ -704,6 +774,10 @@ pub fn export_hvl_editable_m8(
 
     report.used_phrases = next_phrase as usize;
     report.used_chains = next_chain as usize;
+    report.used_tables = hvl_table_ids
+        .iter()
+        .filter(|table_id| table_id.is_some())
+        .count();
 
     if report.dropped_tracks > 0 {
         report.warnings.push(format!(
@@ -804,7 +878,7 @@ pub fn export_s3m_editable_m8(
                     } else {
                         S3mCell::EMPTY
                     };
-                    let step = convert_s3m_cell(
+                    let mut step = convert_s3m_cell(
                         module,
                         cell,
                         &mut current_instruments[track],
@@ -832,6 +906,12 @@ pub fn export_s3m_editable_m8(
                         &mut active_pitch_bends[track],
                         &mut report,
                     );
+                    if track == 0
+                        && chunk * M8_PHRASE_ROWS + row_in_chunk + 1 == block.rows.len()
+                        && let Some(song_hop) = block.song_hop
+                    {
+                        push_song_hop(&mut step, song_hop, &mut report, "S3M");
+                    }
                     packed[row_in_chunk] = pack_step(&step);
                     phrase.steps[row_in_chunk] = step;
                 }
@@ -934,18 +1014,27 @@ fn install_sampler_instruments(song: &mut Song, module: &Module) {
             continue;
         }
 
-        let loop_start = if sample.length_bytes == 0 {
-            0
+        let loop_start = scaled_sample_position(sample.loop_start_bytes, sample.length_bytes);
+        let length = if sample.has_loop() {
+            scaled_sample_position(
+                sample
+                    .loop_start_bytes
+                    .saturating_add(sample.loop_length_bytes)
+                    .min(sample.length_bytes),
+                sample.length_bytes,
+            )
         } else {
-            ((sample.loop_start_bytes.saturating_mul(255)) / sample.length_bytes).min(255) as u8
+            0xff
         };
+        let mut synth_params = sampler_params(sample.volume);
+        synth_params.fine_tune = mod_finetune_to_m8(sample.finetune);
 
         song.instruments[index] = Instrument::Sampler(Sampler {
             number: index as u8,
             name: truncate_ascii(&fallback_sample_name(index, &sample.name), 12),
             transpose: true,
             table_tick: TABLE_TICK_PER_TRACKER_TICK,
-            synth_params: sampler_params(sample.volume),
+            synth_params,
             sample_path: format!("Samples/{}", sample_filename(index, &sample.name)),
             play_mode: if sample.has_loop() {
                 SamplePlayMode::FWDLOOP
@@ -955,7 +1044,7 @@ fn install_sampler_instruments(song: &mut Song, module: &Module) {
             slice: 0,
             start: 0,
             loop_start,
-            length: 0xff,
+            length,
             degrade: 0,
         });
     }
@@ -1000,16 +1089,18 @@ fn install_hvl_performance_tables(song: &mut Song, module: &HvlModule) -> Vec<Op
             if entry.note != 0 {
                 step.transpose = entry.note;
             }
-            if entry.fx[0] == 0x0f {
-                step.fx2 = FX {
-                    command: FX_WAVSYNTH_SIZ,
-                    value: entry.fx_param[0].max(1),
-                };
-            } else if entry.fx[0] == 0x04 {
-                step.fx2 = FX {
-                    command: FX_WAVSYNTH_CUT,
-                    value: entry.fx_param[0],
-                };
+            for fx_index in 0..2 {
+                if entry.fx[fx_index] == 0x0c {
+                    step.velocity = volume_to_velocity(entry.fx_param[fx_index].min(64));
+                    continue;
+                }
+                if let Some(fx) = hvl_plist_fx(entry.fx[fx_index], entry.fx_param[fx_index]) {
+                    if step.fx2.is_empty() {
+                        step.fx2 = fx;
+                    } else if step.fx3.is_empty() {
+                        step.fx3 = fx;
+                    }
+                }
             }
         }
         if !table.is_empty() {
@@ -1018,6 +1109,29 @@ fn install_hvl_performance_tables(song: &mut Song, module: &HvlModule) -> Vec<Op
         }
     }
     table_ids
+}
+
+fn hvl_plist_fx(command: u8, param: u8) -> Option<FX> {
+    let fx = match command {
+        0x01 => FX {
+            command: FX_PBN,
+            value: pitch_bend_value(param, true),
+        },
+        0x02 => FX {
+            command: FX_PBN,
+            value: pitch_bend_value(param, false),
+        },
+        0x04 => FX {
+            command: FX_WAVSYNTH_CUT,
+            value: param,
+        },
+        0x0f => FX {
+            command: FX_WAVSYNTH_SIZ,
+            value: param.max(1),
+        },
+        _ => return None,
+    };
+    Some(fx)
 }
 
 fn hvl_plist_waveform(waveform: u8) -> u8 {
@@ -1069,10 +1183,12 @@ fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: 
             ));
         }
 
-        let loop_start = if sample.data.is_empty() {
-            0
+        let sample_len = sample.data.len();
+        let loop_start = scaled_sample_position(sample.loop_start as usize, sample_len);
+        let length = if sample.is_looped() {
+            scaled_sample_position(sample.loop_end.min(sample_len as u32) as usize, sample_len)
         } else {
-            ((sample.loop_start as usize).saturating_mul(255) / sample.data.len()).min(255) as u8
+            0xff
         };
 
         song.instruments[index] = Instrument::Sampler(Sampler {
@@ -1090,7 +1206,7 @@ fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: 
             slice: 0,
             start: 0,
             loop_start,
-            length: 0xff,
+            length,
             degrade: 0,
         });
     }
@@ -1099,6 +1215,29 @@ fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: 
 fn s3m_table_tick(speed: u8) -> u8 {
     let speed = speed.max(1);
     ((6 + speed / 2) / speed).clamp(1, 6)
+}
+
+fn scaled_sample_position(position: usize, sample_len: usize) -> u8 {
+    if sample_len == 0 {
+        return 0;
+    }
+    if position >= sample_len {
+        return 0xff;
+    }
+    ((position as u64 * 255 + sample_len as u64 / 2) / sample_len as u64).min(255) as u8
+}
+
+fn mod_finetune_to_m8(finetune: i8) -> u8 {
+    (0x80i16 + finetune.clamp(-8, 7) as i16 * 16).clamp(0, 255) as u8
+}
+
+fn mod_finetune_nibble_to_signed(value: u8) -> i8 {
+    let value = value & 0x0f;
+    if value <= 7 {
+        value as i8
+    } else {
+        value as i8 - 16
+    }
 }
 
 fn convert_cell(
@@ -1314,7 +1453,12 @@ fn convert_s3m_cell(
         step.velocity = volume_to_s3m_velocity(cell.volume, global_volume);
         *current_velocity = step.velocity;
     }
-    if !step.note.is_empty() && *current_pan != 0x80 {
+    let wrote_pan = if let Some(pan) = s3m_volume_column_pan(cell.volume) {
+        map_pan(&mut step, pan, current_pan)
+    } else {
+        false
+    };
+    if !wrote_pan && !step.note.is_empty() && *current_pan != 0x80 {
         push_fx(&mut step, FX_SAMPLER_PAN, *current_pan);
     }
 
@@ -1477,6 +1621,16 @@ fn map_mod_effect(
             );
             vibrato_mapped && volume_mapped
         }
+        0x07 => map_tremolo(
+            step,
+            table_allocator,
+            tables,
+            *current_velocity,
+            cell.effect_param,
+            timing.speed,
+            None,
+            used_table_effect,
+        ),
         0x0a => {
             let start = if step.velocity == EMPTY {
                 *current_velocity
@@ -1507,8 +1661,17 @@ fn map_mod_effect(
         0x0e => match cell.effect_param >> 4 {
             0x01 => push_pitch_bend(step, cell.effect_param & 0x0f, true, used_pitch_bend),
             0x02 => push_pitch_bend(step, cell.effect_param & 0x0f, false, used_pitch_bend),
-            0x06 | 0x0e => true,
-            0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.effect_param & 0x0f) * 17),
+            0x03 | 0x04 | 0x06 | 0x07 | 0x0e => true,
+            0x05 => push_fx(
+                step,
+                FX_SAMPLER_FIN,
+                mod_finetune_to_m8(mod_finetune_nibble_to_signed(cell.effect_param & 0x0f)),
+            ),
+            0x08 => push_fx(
+                step,
+                FX_SAMPLER_PAN,
+                s3m_pan_nibble_to_m8(cell.effect_param & 0x0f),
+            ),
             0x09 => push_fx(step, FX_RET, (cell.effect_param & 0x0f) << 4),
             0x0a => map_fine_volume_slide(step, cell.effect_param & 0x0f, current_velocity, true),
             0x0b => map_fine_volume_slide(step, cell.effect_param & 0x0f, current_velocity, false),
@@ -1565,6 +1728,16 @@ fn map_s3m_effect(
         6 => map_s3m_pitch_slide(step, cell.info, true, pitch_slide_memory, used_pitch_bend),
         7 => map_s3m_tone_portamento(step, cell.info, timing.speed, tone_portamento),
         8 | 21 => map_vibrato(step, cell.info, vibrato_memory),
+        9 => map_tremor(
+            step,
+            table_allocator,
+            tables,
+            *current_velocity,
+            cell.info,
+            timing.speed,
+            Some(s3m_table_tick(timing.speed)),
+            used_table_effect,
+        ),
         10 => push_fx(step, FX_ARP, cell.info),
         11 => {
             let vibrato_mapped = map_vibrato(step, 0, vibrato_memory);
@@ -1610,6 +1783,16 @@ fn map_s3m_effect(
         }
         15 => push_fx(step, FX_SAMPLER_STA, cell.info),
         17 => push_fx(step, FX_RET, cell.info),
+        18 => map_tremolo(
+            step,
+            table_allocator,
+            tables,
+            *current_velocity,
+            cell.info,
+            timing.speed,
+            Some(s3m_table_tick(timing.speed)),
+            used_table_effect,
+        ),
         19 => match cell.info >> 4 {
             0x08 => map_pan(step, s3m_pan_nibble_to_m8(cell.info & 0x0f), current_pan),
             0x0b | 0x0e => true,
@@ -1675,6 +1858,76 @@ fn map_volume_slide(
         TableSpec::VolumeSlide {
             start: start_velocity,
             delta,
+            rows,
+        },
+        table_tick,
+        used_table_effect,
+    )
+}
+
+fn map_tremor(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    current_velocity: u8,
+    param: u8,
+    speed: u8,
+    table_tick: Option<u8>,
+    used_table_effect: &mut bool,
+) -> bool {
+    let on = param >> 4;
+    let off = param & 0x0f;
+    if current_velocity == EMPTY || (on == 0 && off == 0) {
+        return true;
+    }
+    let rows = tracker_effect_rows(speed);
+    if rows == 0 {
+        return true;
+    }
+
+    map_table(
+        step,
+        table_allocator,
+        tables,
+        TableSpec::Tremor {
+            velocity: current_velocity,
+            on,
+            off,
+            rows,
+        },
+        table_tick,
+        used_table_effect,
+    )
+}
+
+fn map_tremolo(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    current_velocity: u8,
+    param: u8,
+    speed: u8,
+    table_tick: Option<u8>,
+    used_table_effect: &mut bool,
+) -> bool {
+    let tremolo_speed = param >> 4;
+    let depth = (param & 0x0f).saturating_mul(4);
+    if current_velocity == EMPTY || tremolo_speed == 0 || depth == 0 {
+        return true;
+    }
+    let rows = tracker_effect_rows(speed);
+    if rows == 0 {
+        return true;
+    }
+
+    map_table(
+        step,
+        table_allocator,
+        tables,
+        TableSpec::Tremolo {
+            center: current_velocity,
+            depth,
+            speed: tremolo_speed,
             rows,
         },
         table_tick,
@@ -1900,6 +2153,32 @@ fn build_table(table: &mut Table, spec: TableSpec) {
                 step.velocity = stepped_value(start, delta, index);
             }
         }
+        TableSpec::Tremor {
+            velocity,
+            on,
+            off,
+            rows,
+        } => {
+            let cycle = on.saturating_add(off).max(1);
+            for (index, step) in table.steps.iter_mut().take(rows as usize).enumerate() {
+                let phase = index as u8 % cycle;
+                step.velocity = if phase < on { velocity } else { 0 };
+            }
+        }
+        TableSpec::Tremolo {
+            center,
+            depth,
+            speed,
+            rows,
+        } => {
+            for (index, step) in table.steps.iter_mut().take(rows as usize).enumerate() {
+                let phase = ((index as u8).wrapping_mul(speed.max(1))) & 0x0f;
+                let up = phase < 8;
+                let amount = if up { phase } else { 15 - phase };
+                let delta = (amount as i16 - 4) * depth as i16 / 4;
+                step.velocity = (center as i16 + delta).clamp(0, 255) as u8;
+            }
+        }
     }
 }
 
@@ -1928,6 +2207,14 @@ fn push_fx(step: &mut Step, command: u8, value: u8) -> bool {
     }
 }
 
+fn push_song_hop(step: &mut Step, target_song_row: u8, report: &mut M8Report, format: &str) {
+    if !push_fx(step, FX_SNG, target_song_row) {
+        report.warnings.push(format!(
+            "{format} playback loop could not be written because the final M8 step has no free FX slot"
+        ));
+    }
+}
+
 fn velocity_for_cell(module: &Module, cell: Cell, instrument: u8) -> u8 {
     if cell.effect == 0x0c {
         return volume_to_velocity(cell.effect_param.min(64));
@@ -1947,6 +2234,17 @@ fn volume_to_velocity(volume: u8) -> u8 {
 fn volume_to_s3m_velocity(volume: u8, global_volume: u8) -> u8 {
     let scaled = (volume.min(64) as u16 * global_volume.min(64) as u16) / 64;
     volume_to_velocity(scaled as u8)
+}
+
+fn s3m_volume_column_pan(volume: u8) -> Option<u8> {
+    (0x80..=0xc0).contains(&volume).then(|| {
+        let pan = volume - 0x80;
+        if pan == 32 {
+            0x80
+        } else {
+            ((pan as u16 * 255 + 32) / 64) as u8
+        }
+    })
 }
 
 fn is_mod_tone_portamento(cell: Cell) -> bool {
@@ -1986,7 +2284,55 @@ fn hvl_synth_params(instrument: &HvlInstrument) -> SynthParams {
     let mut params = sampler_params(instrument.volume);
     params.filter_cutoff = instrument.filter_upper_limit.saturating_mul(4).max(1);
     params.filter_res = instrument.filter_speed.saturating_mul(4);
+    if hvl_has_envelope(instrument) {
+        params.mods[0] = AHDEnv {
+            dest: 1,
+            amount: hvl_envelope_amount(instrument),
+            attack: hvl_frame_to_m8(instrument.envelope.attack_frames),
+            hold: hvl_frame_to_m8(instrument.envelope.sustain_frames),
+            decay: hvl_frame_to_m8(
+                instrument
+                    .envelope
+                    .decay_frames
+                    .saturating_add(instrument.envelope.release_frames),
+            ),
+        }
+        .to_mod();
+    }
+    if instrument.vibrato_depth != 0 && instrument.vibrato_speed != 0 {
+        params.mods[1] = LFO {
+            shape: LfoShape::SIN,
+            dest: 2,
+            trigger_mode: LfoTriggerMode::RETRIG,
+            freq: instrument.vibrato_speed,
+            amount: instrument.vibrato_depth.saturating_mul(12),
+            retrigger: instrument.vibrato_delay,
+        }
+        .to_mod();
+    }
     params
+}
+
+fn hvl_has_envelope(instrument: &HvlInstrument) -> bool {
+    let envelope = &instrument.envelope;
+    envelope.attack_frames != 0
+        || envelope.decay_frames != 0
+        || envelope.sustain_frames != 0
+        || envelope.release_frames != 0
+}
+
+fn hvl_envelope_amount(instrument: &HvlInstrument) -> u8 {
+    let peak = instrument
+        .envelope
+        .attack_volume
+        .max(instrument.envelope.decay_volume)
+        .max(instrument.envelope.release_volume)
+        .min(64);
+    volume_to_velocity(peak)
+}
+
+fn hvl_frame_to_m8(frames: u8) -> u8 {
+    frames.saturating_mul(4).max(frames.min(1))
 }
 
 fn hvl_wave_shape(instrument: &HvlInstrument) -> WavShape {
@@ -2361,6 +2707,80 @@ mod tests {
         assert_eq!(step.fx1.value, 2);
         assert_eq!(step.fx2.command, FX_TBL);
         assert!(used_table_effect);
+    }
+
+    #[test]
+    fn mod_flow_loop_is_exported_as_song_hop() {
+        let mut module = test_mod_module();
+        module.patterns[0].rows[0][0] = Cell {
+            effect: 0x0b,
+            effect_param: 0,
+            ..empty_mod_cell()
+        };
+
+        let mut report = M8Report::default();
+        let blocks = build_mod_playback_blocks(&module, &mut report);
+        assert_eq!(blocks.last().and_then(|block| block.song_hop), Some(0));
+        assert!(report.warnings[0].contains("SNG hop"));
+    }
+
+    #[test]
+    fn mod_restart_position_is_exported_as_song_hop() {
+        let mut module = test_mod_module();
+        module.orders = vec![0, 1, 2];
+        module.pattern_count = 3;
+        module.restart_position = 1;
+        module.patterns.push(empty_mod_pattern(4));
+        module.patterns.push(empty_mod_pattern(4));
+
+        let mut report = M8Report::default();
+        let blocks = build_mod_playback_blocks(&module, &mut report);
+        assert_eq!(blocks.last().and_then(|block| block.song_hop), Some(1));
+    }
+
+    #[test]
+    fn maps_sample_loop_end_and_mod_finetune() {
+        assert_eq!(scaled_sample_position(25, 100), 64);
+        assert_eq!(scaled_sample_position(75, 100), 191);
+        assert_eq!(scaled_sample_position(100, 100), 0xff);
+        assert_eq!(mod_finetune_nibble_to_signed(0x0f), -1);
+        assert_eq!(mod_finetune_to_m8(-8), 0x00);
+        assert_eq!(mod_finetune_to_m8(0), 0x80);
+        assert_eq!(mod_finetune_to_m8(7), 0xf0);
+    }
+
+    #[test]
+    fn maps_s3m_volume_column_pan() {
+        assert_eq!(s3m_volume_column_pan(0x80), Some(0x00));
+        assert_eq!(s3m_volume_column_pan(0xa0), Some(0x80));
+        assert_eq!(s3m_volume_column_pan(0xc0), Some(0xff));
+        assert_eq!(s3m_volume_column_pan(0x40), None);
+    }
+
+    #[test]
+    fn tremor_table_alternates_velocity_and_silence() {
+        let mut reader = Reader::new(TEMPLATE.to_vec());
+        let song = Song::read_from_reader(&mut reader).expect("template");
+        let mut table = song.tables[0].clone();
+        table.clear();
+
+        build_table(
+            &mut table,
+            TableSpec::Tremor {
+                velocity: 200,
+                on: 2,
+                off: 1,
+                rows: 5,
+            },
+        );
+
+        let velocities = table
+            .steps
+            .iter()
+            .take(5)
+            .map(|step| step.velocity)
+            .collect::<Vec<_>>();
+        assert_eq!(velocities, vec![200, 200, 0, 200, 200]);
     }
 
     fn test_mod_module() -> Module {
