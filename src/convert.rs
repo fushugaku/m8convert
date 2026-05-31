@@ -224,7 +224,7 @@ pub fn convert_s3m(
         notes: vec![
             "Experimental editable S3M conversion simulates pattern flow, maps playback rows to M8 song rows, enabled S3M channels to M8 tracks, and packed pattern rows to phrases/chains.".to_string(),
             "PCM instruments are exported as mono WAV files at each S3M instrument's C2SPD rate so M8 transposition starts from the same C-4 tuning; AdLib/OPL instruments are reported and skipped.".to_string(),
-            "S3M tick effects are mapped to M8 phrase FX or short tables where possible, including pitch bend, portamento, vibrato, volume slides, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
+            "S3M tick effects are mapped to M8 phrase FX or short tables where possible, including pitch bend, portamento, vibrato, speed-aware volume slides, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
         ],
     };
 

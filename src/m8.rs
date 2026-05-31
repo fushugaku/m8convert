@@ -24,6 +24,7 @@ const FX_PSL: u8 = 0x0c;
 const FX_PBN: u8 = 0x0d;
 const FX_PVB: u8 = 0x0e;
 const FX_TBL: u8 = 0x14;
+const FX_TIC: u8 = 0x16;
 const FX_TPO: u8 = 0x18;
 const FX_SAMPLER_STA: u8 = 0x84;
 const FX_SAMPLER_PAN: u8 = 0x8d;
@@ -1450,6 +1451,7 @@ fn map_mod_effect(
                 timing.speed,
                 current_velocity,
                 volume_slide_memory,
+                None,
                 used_table_effect,
             );
             tone_mapped && volume_mapped
@@ -1470,6 +1472,7 @@ fn map_mod_effect(
                 timing.speed,
                 current_velocity,
                 volume_slide_memory,
+                None,
                 used_table_effect,
             );
             vibrato_mapped && volume_mapped
@@ -1489,6 +1492,7 @@ fn map_mod_effect(
                 timing.speed,
                 current_velocity,
                 volume_slide_memory,
+                None,
                 used_table_effect,
             )
         }
@@ -1553,6 +1557,7 @@ fn map_s3m_effect(
                 timing.speed,
                 current_velocity,
                 volume_slide_memory,
+                Some(s3m_table_tick(timing.speed)),
                 used_table_effect,
             )
         }
@@ -1577,6 +1582,7 @@ fn map_s3m_effect(
                 timing.speed,
                 current_velocity,
                 volume_slide_memory,
+                Some(s3m_table_tick(timing.speed)),
                 used_table_effect,
             );
             vibrato_mapped && volume_mapped
@@ -1597,6 +1603,7 @@ fn map_s3m_effect(
                 timing.speed,
                 current_velocity,
                 volume_slide_memory,
+                Some(s3m_table_tick(timing.speed)),
                 used_table_effect,
             );
             tone_mapped && volume_mapped
@@ -1625,6 +1632,7 @@ fn map_volume_slide(
     ticks: u8,
     current_velocity: &mut u8,
     volume_slide_memory: &mut u8,
+    table_tick: Option<u8>,
     used_table_effect: &mut bool,
 ) -> bool {
     let param = if param == 0 {
@@ -1669,6 +1677,7 @@ fn map_volume_slide(
             delta,
             rows,
         },
+        table_tick,
         used_table_effect,
     )
 }
@@ -1785,12 +1794,21 @@ fn map_table(
     table_allocator: &mut TableAllocator,
     tables: &mut [Table],
     spec: TableSpec,
+    table_tick: Option<u8>,
     used_table_effect: &mut bool,
 ) -> bool {
-    let mapped = table_allocator
-        .allocate(tables, spec)
-        .map(|table| push_fx(step, FX_TBL, table))
-        .unwrap_or(false);
+    let needed_slots = 1 + usize::from(table_tick.is_some());
+    if available_fx_slots(step) < needed_slots {
+        return false;
+    }
+
+    let Some(table) = table_allocator.allocate(tables, spec) else {
+        return false;
+    };
+    if let Some(tick) = table_tick {
+        push_fx(step, FX_TIC, tick);
+    }
+    let mapped = push_fx(step, FX_TBL, table);
     if mapped {
         *used_table_effect = true;
     }
@@ -1803,6 +1821,13 @@ fn push_pitch_bend(step: &mut Step, amount: u8, upward: bool, used_pitch_bend: &
         *used_pitch_bend = true;
     }
     mapped
+}
+
+fn available_fx_slots(step: &Step) -> usize {
+    [step.fx1, step.fx2, step.fx3]
+        .iter()
+        .filter(|fx| fx.is_empty())
+        .count()
 }
 
 fn pitch_bend_value(amount: u8, upward: bool) -> u8 {
@@ -2306,6 +2331,36 @@ mod tests {
     fn s3m_table_tick_stretches_fast_tracker_speeds() {
         assert_eq!(s3m_table_tick(3), 2);
         assert_eq!(s3m_table_tick(6), 1);
+    }
+
+    #[test]
+    fn s3m_volume_slide_sets_table_tick_before_table() {
+        let mut reader = Reader::new(TEMPLATE.to_vec());
+        let song = Song::read_from_reader(&mut reader).expect("template");
+        let mut tables = song.tables;
+        let mut allocator = TableAllocator::new();
+        let mut step = empty_step();
+        let mut current_velocity = 0x80;
+        let mut memory = 0;
+        let mut used_table_effect = false;
+
+        assert!(map_volume_slide(
+            &mut step,
+            &mut allocator,
+            &mut tables,
+            0x80,
+            0x01,
+            3,
+            &mut current_velocity,
+            &mut memory,
+            Some(s3m_table_tick(3)),
+            &mut used_table_effect,
+        ));
+
+        assert_eq!(step.fx1.command, FX_TIC);
+        assert_eq!(step.fx1.value, 2);
+        assert_eq!(step.fx2.command, FX_TBL);
+        assert!(used_table_effect);
     }
 
     fn test_mod_module() -> Module {
