@@ -1,0 +1,5 @@
+/target
+/pkg
+/web/pkg
+/m8convert-out
+/.DS_Store

@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>m8convert</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #f7f7f4;
+        color: #191a1d;
+      }
+
+      main {
+        width: min(920px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 40px 0;
+      }
+
+      h1 {
+        margin: 0 0 24px;
+        font-size: 32px;
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+
+      .panel {
+        border: 1px solid #d7d5ce;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 20px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 650;
+      }
+
+      input,
+      button {
+        font: inherit;
+      }
+
+      input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #c7c5bd;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-bottom: 16px;
+      }
+
+      input[type="file"] {
+        display: block;
+        margin-bottom: 16px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 6px;
+        background: #146c5a;
+        color: white;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      pre {
+        overflow: auto;
+        border-radius: 6px;
+        background: #202124;
+        color: #f4f4ed;
+        padding: 16px;
+      }
+
+      a {
+        color: #145f91;
+      }
+
+      .downloads {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+        margin-top: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>m8convert</h1>
+      <section class="panel">
+        <label for="song-name">Song name</label>
+        <input id="song-name" type="text" maxlength="32" placeholder="Optional M8 project name" />
+
+        <label for="mod-file">Tracker file</label>
+        <input id="mod-file" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" />
+
+        <button id="convert" disabled>Convert</button>
+        <div id="downloads" class="downloads"></div>
+        <pre id="report"></pre>
+      </section>
+    </main>
+
+    <script type="module">
+      import init, { convert_tracker_to_m8_bundle_json } from "./pkg/m8convert.js";
+
+      const fileInput = document.querySelector("#mod-file");
+      const songName = document.querySelector("#song-name");
+      const button = document.querySelector("#convert");
+      const downloads = document.querySelector("#downloads");
+      const report = document.querySelector("#report");
+
+      await init();
+      fileInput.addEventListener("change", () => {
+        button.disabled = !fileInput.files.length;
+      });
+
+      button.addEventListener("click", async () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        button.disabled = true;
+        downloads.replaceChildren();
+        report.textContent = "Converting...";
+
+        try {
+          const input = new Uint8Array(await file.arrayBuffer());
+          const raw = convert_tracker_to_m8_bundle_json(input, songName.value || undefined);
+          const bundle = JSON.parse(raw);
+
+          for (const output of bundle.files) {
+            const bytes = Uint8Array.from(atob(output.data_base64), (char) => char.charCodeAt(0));
+            const blob = new Blob([bytes], { type: output.mime_type });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = output.path;
+            link.textContent = output.path;
+            downloads.append(link);
+          }
+
+          report.textContent = JSON.stringify(bundle.report, null, 2);
+        } catch (error) {
+          report.textContent = String(error);
+        } finally {
+          button.disabled = !fileInput.files.length;
+        }
+      });
+    </script>
+  </body>
+</html>
