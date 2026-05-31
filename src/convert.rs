@@ -9,7 +9,7 @@ use crate::m8::{
 };
 use crate::modfile::{ModError, Module, parse_mod};
 use crate::s3mfile::{S3mError, S3mModule, is_s3m, parse_s3m};
-use crate::wav::{encode_s3m_sample_as_wav, encode_sample_as_wav};
+use crate::wav::{M8_SAMPLE_RATE, encode_s3m_sample_as_wav, encode_sample_as_wav};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConversionOptions {
@@ -223,7 +223,7 @@ pub fn convert_s3m(
         m8: m8_export.report,
         notes: vec![
             "Experimental editable S3M conversion maps order rows to M8 song rows, enabled S3M channels to M8 tracks, and packed pattern rows to phrases/chains.".to_string(),
-            "PCM instruments are exported as mono WAV files; AdLib/OPL instruments are reported and skipped.".to_string(),
+            format!("PCM instruments are exported as mono WAV files resampled to {M8_SAMPLE_RATE} Hz for M8 playback; AdLib/OPL instruments are reported and skipped."),
             "S3M tick effects are listed in unsupported_effects unless they can be represented as a static phrase value.".to_string(),
         ],
     };
@@ -408,6 +408,7 @@ fn s3m_manifest_json(module: &S3mModule, project_name: &str) -> Result<Vec<u8>, 
         c5_speed: u32,
         loop_start: u32,
         loop_end: u32,
+        exported_sample_rate: u32,
         is_16bit: bool,
         is_stereo: bool,
     }
@@ -426,6 +427,7 @@ fn s3m_manifest_json(module: &S3mModule, project_name: &str) -> Result<Vec<u8>, 
             c5_speed: sample.c5_speed,
             loop_start: sample.loop_start,
             loop_end: sample.loop_end,
+            exported_sample_rate: M8_SAMPLE_RATE,
             is_16bit: sample.is_16bit(),
             is_stereo: sample.is_stereo(),
         })
