@@ -23,11 +23,12 @@ const FX_RET: u8 = 0x08;
 const FX_PVB: u8 = 0x0e;
 const FX_TBL: u8 = 0x14;
 const FX_TPO: u8 = 0x18;
-const FX_SAMPLER_VOL: u8 = 0x80;
 const FX_SAMPLER_FIN: u8 = 0x82;
 const FX_SAMPLER_STA: u8 = 0x84;
 const FX_SAMPLER_PAN: u8 = 0x8d;
 const TABLE_TICK_PER_TRACKER_TICK: u8 = 0x01;
+const SAMPLER_DEFAULT_AMP: u8 = 0x00;
+const SAMPLER_DEFAULT_DRY: u8 = 0xc0;
 
 #[derive(Debug, Error)]
 pub enum M8Error {
@@ -85,7 +86,7 @@ struct TimingContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TableSpec {
     Empty,
-    VolumeSlide { delta: i8, rows: u8 },
+    VolumeSlide { start: u8, delta: i8, rows: u8 },
     FineSlide { delta: i8, rows: u8 },
 }
 
@@ -1196,7 +1197,11 @@ fn map_volume_slide(
         step,
         table_allocator,
         tables,
-        TableSpec::VolumeSlide { delta, rows },
+        TableSpec::VolumeSlide {
+            start: start_velocity,
+            delta,
+            rows,
+        },
         used_table_effect,
     )
 }
@@ -1307,7 +1312,8 @@ fn map_fine_volume_slide(
         negative_delta(amount.saturating_mul(4))
     };
     *current_velocity = stepped_value(*current_velocity, delta, 0);
-    push_fx(step, FX_SAMPLER_VOL, relative_fx_value(delta))
+    step.velocity = *current_velocity;
+    true
 }
 
 fn is_s3m_fine_volume_slide(param: u8) -> bool {
@@ -1319,12 +1325,9 @@ fn is_s3m_fine_volume_slide(param: u8) -> bool {
 fn build_table(table: &mut Table, spec: TableSpec) {
     match spec {
         TableSpec::Empty => {}
-        TableSpec::VolumeSlide { delta, rows } => {
-            for step in table.steps.iter_mut().take(rows as usize) {
-                step.fx1 = FX {
-                    command: FX_SAMPLER_VOL,
-                    value: relative_fx_value(delta),
-                };
+        TableSpec::VolumeSlide { start, delta, rows } => {
+            for (index, step) in table.steps.iter_mut().take(rows as usize).enumerate() {
+                step.velocity = stepped_value(start, delta, index);
             }
         }
         TableSpec::FineSlide { delta, rows } => {
@@ -1387,10 +1390,10 @@ fn sampler_params(volume: u8) -> SynthParams {
         filter_type: 0,
         filter_cutoff: 0xff,
         filter_res: 0,
-        amp: 0xff,
+        amp: SAMPLER_DEFAULT_AMP,
         limit: LimitType::try_from(0).expect("limit type 0 is valid"),
         mixer_pan: 0x80,
-        mixer_dry: 0xff,
+        mixer_dry: SAMPLER_DEFAULT_DRY,
         mixer_mfx: 0,
         mixer_delay: 0,
         mixer_reverb: 0,
