@@ -527,6 +527,7 @@ mod tests {
         let mut reader: &[u8] = &song_bytes;
         let song = Song::read(&mut reader).expect("m8 song is readable");
         assert_eq!(song.directory, "/Bundles/TEST/");
+        assert_tempo(song.tempo, 125.0);
         assert_ne!(song.song.steps[0], 0xff);
         assert_sampler_pitch_defaults(&song);
     }
@@ -570,8 +571,28 @@ mod tests {
         let song_bytes = STANDARD.decode(&song_file.data_base64).expect("base64");
         let mut reader: &[u8] = &song_bytes;
         let song = Song::read(&mut reader).expect("m8 song is readable");
+        assert_tempo(song.tempo, 125.0);
         assert_ne!(song.song.steps[0], 0xff);
         assert_sampler_pitch_defaults(&song);
+    }
+
+    #[test]
+    fn converts_s3m_speed_to_m8_tempo() {
+        let mut input = minimal_s3m();
+        input[0x31] = 3;
+        input[0x32] = 125;
+        let bundle =
+            convert_tracker(&input, ConversionOptions::default()).expect("conversion succeeds");
+        let song_file = bundle
+            .files
+            .iter()
+            .find(|file| file.path.ends_with(".m8s"))
+            .expect("m8s file");
+        let song_bytes = STANDARD.decode(&song_file.data_base64).expect("base64");
+        let mut reader: &[u8] = &song_bytes;
+        let song = Song::read(&mut reader).expect("m8 song is readable");
+        assert_tempo(song.tempo, 250.0);
+        assert_tempo(bundle.report.m8.applied_tempo_bpm.unwrap(), 250.0);
     }
 
     fn assert_sampler_pitch_defaults(song: &Song) {
@@ -585,6 +606,10 @@ mod tests {
             .expect("sampler instrument");
         assert_eq!(sampler.synth_params.pitch, 0);
         assert_eq!(sampler.synth_params.fine_tune, 0x80);
+    }
+
+    fn assert_tempo(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 0.01, "{actual} != {expected}");
     }
 
     fn minimal_mod() -> Vec<u8> {

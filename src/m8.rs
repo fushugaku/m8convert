@@ -39,6 +39,7 @@ pub struct M8Report {
     pub dropped_tracks: usize,
     pub dropped_phrases: usize,
     pub dropped_chains: usize,
+    pub applied_tempo_bpm: Option<f32>,
     pub unsupported_effects: Vec<UnsupportedEffect>,
     pub warnings: Vec<String>,
 }
@@ -74,6 +75,7 @@ pub fn export_editable_m8(
     let mut report = M8Report {
         used_tracks: module.channel_count.min(M8_TRACKS),
         dropped_tracks: module.channel_count.saturating_sub(M8_TRACKS),
+        applied_tempo_bpm: Some(mod_m8_tempo(module)),
         ..M8Report::default()
     };
 
@@ -193,6 +195,7 @@ pub fn export_editable_m8(
         &mut song_bytes,
         options.song_name.as_deref().unwrap_or(&module.title),
         options.bundle_directory.as_deref(),
+        report.applied_tempo_bpm,
     );
 
     Ok(M8Export { song_bytes, report })
@@ -328,6 +331,7 @@ pub fn export_hvl_editable_m8(
         &mut song_bytes,
         options.song_name.as_deref().unwrap_or(&module.title),
         options.bundle_directory.as_deref(),
+        None,
     );
 
     Ok(M8Export { song_bytes, report })
@@ -346,6 +350,10 @@ pub fn export_s3m_editable_m8(
     let mut report = M8Report {
         used_tracks: module.active_channels.len().min(M8_TRACKS),
         dropped_tracks: module.active_channels.len().saturating_sub(M8_TRACKS),
+        applied_tempo_bpm: Some(tracker_rows_to_m8_bpm(
+            module.initial_speed,
+            module.initial_tempo,
+        )),
         ..M8Report::default()
     };
 
@@ -458,6 +466,7 @@ pub fn export_s3m_editable_m8(
         &mut song_bytes,
         options.song_name.as_deref().unwrap_or(&module.title),
         options.bundle_directory.as_deref(),
+        report.applied_tempo_bpm,
     );
 
     Ok(M8Export { song_bytes, report })
@@ -837,14 +846,64 @@ fn empty_hvl_step() -> HvlStep {
     }
 }
 
-fn patch_header(song_bytes: &mut [u8], title: &str, bundle_directory: Option<&str>) {
+fn mod_m8_tempo(module: &Module) -> f32 {
+    let mut speed = 6;
+    let mut tempo = 125;
+
+    if let Some(pattern_id) = module.orders.first() {
+        if let Some(pattern) = module.patterns.get(*pattern_id as usize) {
+            for row in &pattern.rows {
+                for cell in row.iter().take(module.channel_count) {
+                    if cell.effect == 0x0f && cell.effect_param != 0 {
+                        if cell.effect_param <= 32 {
+                            speed = cell.effect_param;
+                        } else {
+                            tempo = cell.effect_param;
+                        }
+                    }
+                }
+                if row.iter().any(|cell| !cell.is_empty()) {
+                    break;
+                }
+            }
+        }
+    }
+
+    tracker_rows_to_m8_bpm(speed, tempo)
+}
+
+fn tracker_rows_to_m8_bpm(speed: u8, tempo: u8) -> f32 {
+    let speed = speed.max(1) as f32;
+    let tempo = tempo.max(32) as f32;
+    (tempo * 6.0 / speed).clamp(20.0, 999.0)
+}
+
+fn patch_header(
+    song_bytes: &mut [u8],
+    title: &str,
+    bundle_directory: Option<&str>,
+    tempo_bpm: Option<f32>,
+) {
     let directory_offset = 14;
     if let Some(directory) = bundle_directory {
         patch_fixed_ascii(song_bytes, directory_offset, 128, directory);
     }
 
+    let tempo_offset = 14 + 128 + 1;
+    if let Some(tempo_bpm) = tempo_bpm {
+        patch_f32(song_bytes, tempo_offset, tempo_bpm);
+    }
+
     let name_offset = 14 + 128 + 1 + 4 + 1;
     patch_fixed_ascii(song_bytes, name_offset, 12, title);
+}
+
+fn patch_f32(bytes: &mut [u8], offset: usize, value: f32) {
+    if bytes.len() < offset + 4 {
+        return;
+    }
+
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 fn patch_fixed_ascii(bytes: &mut [u8], offset: usize, len: usize, value: &str) {
