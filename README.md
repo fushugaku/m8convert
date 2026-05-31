@@ -12,9 +12,9 @@ The converter currently emits:
 
 ## Why The Report Matters
 
-MOD, HVL, S3M, and M8 are all trackers, but their sequencing and instrument models are not identical. A MOD/S3M pattern has 64 rows per channel; HVL has positions that reference reusable tracks plus synthetic instruments; M8 uses song rows, chains, and 16-step phrases. Large source modules can exceed M8's 255 phrase / 255 chain limits, and tick-time effects do not map 1:1 to static M8 phrase cells.
+MOD, HVL, S3M, and M8 are all trackers, but their sequencing and instrument models are not identical. A MOD/S3M pattern has 64 rows per channel; HVL has positions that reference reusable tracks plus synthetic instruments; M8 uses song rows, chains, 16-step phrases, and tables for tick-time behavior. Large source modules can exceed M8's 255 phrase / 255 chain limits, and some tracker effects still need deliberate translation.
 
-This project does not silently pretend those conversions are exact. Notes, instruments, volumes, order table, sample data, and sample loops are exported; unsupported effects are preserved in the JSON report so the next pass can map them deliberately.
+This project does not silently pretend those conversions are exact. Notes, instruments, volumes, order table, sample data, sample loops, tempo, direct effects, slides, vibrato, and retrigger effects are exported where M8 has a compatible representation; unsupported effects are preserved in the JSON report so the next pass can map them deliberately.
 
 ## CLI
 
@@ -51,7 +51,7 @@ Then visit `http://localhost:8080/web/`.
 - HVL0/HVL1 HivelyTracker modules with 4-16 channels
 - HVL instruments are approximated as M8 WavSynth patches; exact Hively synthesis is not implemented yet
 - S3M modules with PCM sample instruments and packed patterns
-- S3M AdLib/OPL instruments and tick effects are reported but not exactly converted yet
+- S3M AdLib/OPL instruments are reported and skipped; supported tick effects are translated to phrase FX or M8 tables
 
 ## Implementation Notes
 

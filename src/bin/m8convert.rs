@@ -8,7 +8,7 @@ use m8convert::{ConversionOptions, convert_tracker};
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Convert MOD/HVL tracker files into an editable Dirtywave M8 bundle"
+    about = "Convert MOD/HVL/S3M tracker files into an editable Dirtywave M8 bundle"
 )]
 struct Args {
     input: PathBuf,
@@ -45,9 +45,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.out.display()
     );
     println!(
-        "M8: {} phrases, {} chains, {} unsupported source effects",
+        "M8: {} phrases, {} chains, {} tables, {} unsupported source effects",
         bundle.report.m8.used_phrases,
         bundle.report.m8.used_chains,
+        bundle.report.m8.used_tables,
         bundle.report.m8.unsupported_effects.len()
     );
     for warning in &bundle.report.m8.warnings {

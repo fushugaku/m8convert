@@ -114,7 +114,7 @@ pub fn convert_mod(
         notes: vec![
             "Editable conversion maps MOD order rows to M8 song rows, MOD channels to M8 tracks, and MOD rows to phrases/chains.".to_string(),
             "Samples are exported as unsigned 8-bit mono WAV files with loop metadata when present; M8 song files reference those external samples.".to_string(),
-            "ProTracker tick effects are listed in unsupported_effects unless they can be represented as a static phrase value.".to_string(),
+            "ProTracker tick effects are mapped to phrase FX or short M8 tables where possible, including slides, vibrato, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
         ],
     };
 
@@ -224,7 +224,7 @@ pub fn convert_s3m(
         notes: vec![
             "Experimental editable S3M conversion maps order rows to M8 song rows, enabled S3M channels to M8 tracks, and packed pattern rows to phrases/chains.".to_string(),
             format!("PCM instruments are exported as mono WAV files resampled to {M8_SAMPLE_RATE} Hz for M8 playback; AdLib/OPL instruments are reported and skipped."),
-            "S3M tick effects are listed in unsupported_effects unless they can be represented as a static phrase value.".to_string(),
+            "S3M tick effects are mapped to phrase FX or short M8 tables where possible, including slides, vibrato, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
         ],
     };
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use m8_file_parser::{
     AHDEnv, Chain, ChainStep, FX, Instrument, LimitType, Note, Phrase, SamplePlayMode, Sampler,
-    Song, Step, SynthParams, WavShape, WavSynth, reader::Reader, writer::Writer,
+    Song, Step, SynthParams, Table, WavShape, WavSynth, reader::Reader, writer::Writer,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -19,9 +19,15 @@ const EMPTY: u8 = 0xff;
 const FX_ARP: u8 = 0x00;
 const FX_DEL: u8 = 0x02;
 const FX_KIL: u8 = 0x05;
+const FX_RET: u8 = 0x08;
+const FX_PVB: u8 = 0x0e;
+const FX_TBL: u8 = 0x14;
 const FX_TPO: u8 = 0x18;
+const FX_SAMPLER_VOL: u8 = 0x80;
+const FX_SAMPLER_FIN: u8 = 0x82;
 const FX_SAMPLER_STA: u8 = 0x84;
 const FX_SAMPLER_PAN: u8 = 0x8d;
+const TABLE_TICK_PER_TRACKER_TICK: u8 = 0x01;
 
 #[derive(Debug, Error)]
 pub enum M8Error {
@@ -45,6 +51,8 @@ pub struct M8Report {
     pub dropped_tracks: usize,
     pub dropped_phrases: usize,
     pub dropped_chains: usize,
+    pub used_tables: usize,
+    pub dropped_tables: usize,
     pub applied_tempo_bpm: Option<f32>,
     pub unsupported_effects: Vec<UnsupportedEffect>,
     pub warnings: Vec<String>,
@@ -68,6 +76,74 @@ struct PackedStep {
     fx: [(u8, u8); 3],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TimingContext {
+    speed: u8,
+    tpo: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TableSpec {
+    Empty,
+    VolumeSlide { delta: i8, rows: u8 },
+    FineSlide { delta: i8, rows: u8 },
+}
+
+struct TableAllocator {
+    next_table: u8,
+    cache: HashMap<TableSpec, u8>,
+    dropped: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PitchSlideMemory {
+    up: u8,
+    down: u8,
+}
+
+impl Default for TimingContext {
+    fn default() -> Self {
+        Self {
+            speed: 6,
+            tpo: None,
+        }
+    }
+}
+
+impl TableAllocator {
+    fn new() -> Self {
+        Self {
+            next_table: 0,
+            cache: HashMap::new(),
+            dropped: 0,
+        }
+    }
+
+    fn allocate(&mut self, tables: &mut [Table], spec: TableSpec) -> Option<u8> {
+        if let Some(table_id) = self.cache.get(&spec) {
+            return Some(*table_id);
+        }
+        if self.next_table as usize >= tables.len() {
+            self.dropped += 1;
+            return None;
+        }
+
+        let table_id = self.next_table;
+        self.next_table = self.next_table.saturating_add(1);
+
+        let mut table = tables[table_id as usize].clone();
+        table.clear();
+        build_table(&mut table, spec);
+        tables[table_id as usize] = table;
+        self.cache.insert(spec, table_id);
+        Some(table_id)
+    }
+
+    fn empty_table(&mut self, tables: &mut [Table]) -> Option<u8> {
+        self.allocate(tables, TableSpec::Empty)
+    }
+}
+
 pub fn export_editable_m8(
     module: &Module,
     options: &ConversionOptions,
@@ -88,12 +164,18 @@ pub fn export_editable_m8(
     clear_song(&mut song);
     install_sampler_instruments(&mut song, module);
 
-    let timing_fx = mod_timing_fx(module);
+    let timing_contexts = mod_timing_contexts(module);
+    let mut table_allocator = TableAllocator::new();
     let mut phrase_cache: HashMap<[PackedStep; M8_PHRASE_ROWS], u8> = HashMap::new();
     let mut chain_cache: HashMap<[u8; 4], u8> = HashMap::new();
     let mut next_phrase = 0u8;
     let mut next_chain = 0u8;
     let mut current_instruments = vec![EMPTY; module.channel_count];
+    let mut current_velocities = vec![EMPTY; module.channel_count];
+    let mut volume_slide_memory = vec![0u8; module.channel_count];
+    let mut vibrato_memory = vec![0u8; module.channel_count];
+    let mut pitch_slide_memory = vec![PitchSlideMemory::default(); module.channel_count];
+    let mut active_table_effects = vec![false; module.channel_count];
 
     for (order_index, pattern_id) in module.orders.iter().enumerate() {
         let Some(pattern) = module.patterns.get(*pattern_id as usize) else {
@@ -122,7 +204,17 @@ pub fn export_editable_m8(
                         *pattern_id,
                         row,
                         channel,
-                        timing_fx.get(&(order_index, row, channel)).copied(),
+                        timing_contexts
+                            .get(&(order_index, row, channel))
+                            .copied()
+                            .unwrap_or_default(),
+                        &mut table_allocator,
+                        &mut song.tables,
+                        &mut current_velocities[channel],
+                        &mut volume_slide_memory[channel],
+                        &mut vibrato_memory[channel],
+                        &mut pitch_slide_memory[channel],
+                        &mut active_table_effects[channel],
                         &mut report,
                     );
                     packed[row_in_chunk] = pack_step(&step);
@@ -176,6 +268,8 @@ pub fn export_editable_m8(
 
     report.used_phrases = next_phrase as usize;
     report.used_chains = next_chain as usize;
+    report.used_tables = table_allocator.next_table as usize;
+    report.dropped_tables = table_allocator.dropped;
 
     if report.dropped_tracks > 0 {
         report.warnings.push(format!(
@@ -368,12 +462,18 @@ pub fn export_s3m_editable_m8(
     clear_song(&mut song);
     install_s3m_sampler_instruments(&mut song, module, &mut report);
 
-    let timing_fx = s3m_timing_fx(module);
+    let timing_contexts = s3m_timing_contexts(module);
+    let mut table_allocator = TableAllocator::new();
     let mut phrase_cache: HashMap<[PackedStep; M8_PHRASE_ROWS], u8> = HashMap::new();
     let mut chain_cache: HashMap<[u8; 4], u8> = HashMap::new();
     let mut next_phrase = 0u8;
     let mut next_chain = 0u8;
     let mut current_instruments = vec![EMPTY; module.active_channels.len()];
+    let mut current_velocities = vec![EMPTY; module.active_channels.len()];
+    let mut volume_slide_memory = vec![0u8; module.active_channels.len()];
+    let mut vibrato_memory = vec![0u8; module.active_channels.len()];
+    let mut pitch_slide_memory = vec![PitchSlideMemory::default(); module.active_channels.len()];
+    let mut active_table_effects = vec![false; module.active_channels.len()];
 
     for (order_index, pattern_id) in module.orders.iter().enumerate() {
         let Some(pattern) = module.patterns.get(*pattern_id as usize) else {
@@ -401,7 +501,17 @@ pub fn export_s3m_editable_m8(
                         *pattern_id,
                         row,
                         *source_channel,
-                        timing_fx.get(&(order_index, row, *source_channel)).copied(),
+                        timing_contexts
+                            .get(&(order_index, row, *source_channel))
+                            .copied()
+                            .unwrap_or_default(),
+                        &mut table_allocator,
+                        &mut song.tables,
+                        &mut current_velocities[track],
+                        &mut volume_slide_memory[track],
+                        &mut vibrato_memory[track],
+                        &mut pitch_slide_memory[track],
+                        &mut active_table_effects[track],
                         &mut report,
                     );
                     packed[row_in_chunk] = pack_step(&step);
@@ -455,6 +565,8 @@ pub fn export_s3m_editable_m8(
 
     report.used_phrases = next_phrase as usize;
     report.used_chains = next_chain as usize;
+    report.used_tables = table_allocator.next_table as usize;
+    report.dropped_tables = table_allocator.dropped;
 
     if report.dropped_tracks > 0 {
         report.warnings.push(format!(
@@ -490,6 +602,9 @@ fn clear_song(song: &mut Song) {
     for chain in &mut song.chains {
         chain.clear();
     }
+    for table in &mut song.tables {
+        table.clear();
+    }
     for instrument in &mut song.instruments {
         *instrument = Instrument::None;
     }
@@ -511,7 +626,7 @@ fn install_sampler_instruments(song: &mut Song, module: &Module) {
             number: index as u8,
             name: truncate_ascii(&fallback_sample_name(index, &sample.name), 12),
             transpose: true,
-            table_tick: 0,
+            table_tick: TABLE_TICK_PER_TRACKER_TICK,
             synth_params: sampler_params(sample.volume),
             sample_path: format!("Samples/{}", sample_filename(index, &sample.name)),
             play_mode: if sample.has_loop() {
@@ -597,7 +712,7 @@ fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: 
             number: index as u8,
             name: truncate_ascii(&fallback_sample_name(index, &sample.name), 12),
             transpose: true,
-            table_tick: 0,
+            table_tick: TABLE_TICK_PER_TRACKER_TICK,
             synth_params: sampler_params(sample.volume),
             sample_path: format!("Samples/{}", s3m_sample_filename(index, &sample.name)),
             play_mode: if sample.is_looped() {
@@ -622,7 +737,14 @@ fn convert_cell(
     pattern: u8,
     row: usize,
     channel: usize,
-    timing_tpo: Option<u8>,
+    timing: TimingContext,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    current_velocity: &mut u8,
+    volume_slide_memory: &mut u8,
+    vibrato_memory: &mut u8,
+    pitch_slide_memory: &mut PitchSlideMemory,
+    active_table_effect: &mut bool,
     report: &mut M8Report,
 ) -> Step {
     if cell.sample_number > 0 {
@@ -634,11 +756,33 @@ fn convert_cell(
         step.note = Note(note);
         step.instrument = *current_instrument;
         step.velocity = velocity_for_cell(module, cell, *current_instrument);
+        *current_velocity = step.velocity;
     } else if cell.effect == 0x0c {
         step.velocity = volume_to_velocity(cell.effect_param.min(64));
+        *current_velocity = step.velocity;
     }
 
-    if !map_mod_effect(cell, timing_tpo, &mut step) && should_report_effect(cell) {
+    let mut used_table_effect = false;
+    let mapped = map_mod_effect(
+        cell,
+        timing,
+        &mut step,
+        table_allocator,
+        tables,
+        current_velocity,
+        volume_slide_memory,
+        vibrato_memory,
+        pitch_slide_memory,
+        &mut used_table_effect,
+    );
+    update_active_table_effect(
+        &mut step,
+        table_allocator,
+        tables,
+        used_table_effect,
+        active_table_effect,
+    );
+    if !mapped && should_report_effect(cell) {
         report.unsupported_effects.push(UnsupportedEffect {
             order,
             pattern,
@@ -711,7 +855,14 @@ fn convert_s3m_cell(
     pattern: u8,
     row: usize,
     channel: usize,
-    timing_tpo: Option<u8>,
+    timing: TimingContext,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    current_velocity: &mut u8,
+    volume_slide_memory: &mut u8,
+    vibrato_memory: &mut u8,
+    pitch_slide_memory: &mut PitchSlideMemory,
+    active_table_effect: &mut bool,
     report: &mut M8Report,
 ) -> Step {
     if cell.instrument > 0 {
@@ -733,11 +884,33 @@ fn convert_s3m_cell(
                 .map(|sample| volume_to_velocity(sample.volume))
                 .unwrap_or(0xff)
         };
+        *current_velocity = step.velocity;
     } else if cell.volume <= 64 {
         step.velocity = volume_to_velocity(cell.volume);
+        *current_velocity = step.velocity;
     }
 
-    if !map_s3m_effect(cell, timing_tpo, &mut step) && cell.command != 0 {
+    let mut used_table_effect = false;
+    let mapped = map_s3m_effect(
+        cell,
+        timing,
+        &mut step,
+        table_allocator,
+        tables,
+        current_velocity,
+        volume_slide_memory,
+        vibrato_memory,
+        pitch_slide_memory,
+        &mut used_table_effect,
+    );
+    update_active_table_effect(
+        &mut step,
+        table_allocator,
+        tables,
+        used_table_effect,
+        active_table_effect,
+    );
+    if !mapped && cell.command != 0 {
         report.unsupported_effects.push(UnsupportedEffect {
             order,
             pattern,
@@ -759,17 +932,124 @@ fn should_report_effect(cell: Cell) -> bool {
     !matches!(cell.effect, 0x0c)
 }
 
-fn map_mod_effect(cell: Cell, timing_tpo: Option<u8>, step: &mut Step) -> bool {
+fn update_active_table_effect(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    used_table_effect: bool,
+    active_table_effect: &mut bool,
+) {
+    if used_table_effect {
+        *active_table_effect = true;
+        return;
+    }
+
+    if !*active_table_effect {
+        return;
+    }
+
+    if let Some(table) = table_allocator.empty_table(tables) {
+        if push_fx(step, FX_TBL, table) {
+            *active_table_effect = false;
+        }
+    }
+}
+
+fn map_mod_effect(
+    cell: Cell,
+    timing: TimingContext,
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    current_velocity: &mut u8,
+    volume_slide_memory: &mut u8,
+    vibrato_memory: &mut u8,
+    pitch_slide_memory: &mut PitchSlideMemory,
+    used_table_effect: &mut bool,
+) -> bool {
     match cell.effect {
         0x00 if cell.effect_param != 0 => push_fx(step, FX_ARP, cell.effect_param),
+        0x01 => map_pitch_slide(
+            step,
+            table_allocator,
+            tables,
+            cell.effect_param,
+            timing.speed,
+            true,
+            pitch_slide_memory,
+            used_table_effect,
+        ),
+        0x02 => map_pitch_slide(
+            step,
+            table_allocator,
+            tables,
+            cell.effect_param,
+            timing.speed,
+            false,
+            pitch_slide_memory,
+            used_table_effect,
+        ),
+        0x04 => map_vibrato(step, cell.effect_param, vibrato_memory),
+        0x06 => {
+            let vibrato_mapped = map_vibrato(step, 0, vibrato_memory);
+            let start = if step.velocity == EMPTY {
+                *current_velocity
+            } else {
+                step.velocity
+            };
+            let volume_mapped = map_volume_slide(
+                step,
+                table_allocator,
+                tables,
+                start,
+                cell.effect_param,
+                timing.speed,
+                current_velocity,
+                volume_slide_memory,
+                used_table_effect,
+            );
+            vibrato_mapped && volume_mapped
+        }
+        0x0a => {
+            let start = if step.velocity == EMPTY {
+                *current_velocity
+            } else {
+                step.velocity
+            };
+            map_volume_slide(
+                step,
+                table_allocator,
+                tables,
+                start,
+                cell.effect_param,
+                timing.speed,
+                current_velocity,
+                volume_slide_memory,
+                used_table_effect,
+            )
+        }
         0x08 => push_fx(step, FX_SAMPLER_PAN, cell.effect_param),
         0x09 => push_fx(step, FX_SAMPLER_STA, cell.effect_param),
         0x0c => true,
-        0x0f => timing_tpo
+        0x0f => timing
+            .tpo
             .map(|tempo| push_fx(step, FX_TPO, tempo))
             .unwrap_or(false),
         0x0e => match cell.effect_param >> 4 {
+            0x01 => push_fx(
+                step,
+                FX_SAMPLER_FIN,
+                relative_fx_value(positive_delta(cell.effect_param & 0x0f)),
+            ),
+            0x02 => push_fx(
+                step,
+                FX_SAMPLER_FIN,
+                relative_fx_value(negative_delta(cell.effect_param & 0x0f)),
+            ),
             0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.effect_param & 0x0f) * 17),
+            0x09 => push_fx(step, FX_RET, (cell.effect_param & 0x0f) << 4),
+            0x0a => map_fine_volume_slide(step, cell.effect_param & 0x0f, current_velocity, true),
+            0x0b => map_fine_volume_slide(step, cell.effect_param & 0x0f, current_velocity, false),
             0x0c => push_fx(step, FX_KIL, cell.effect_param & 0x0f),
             0x0d => push_fx(step, FX_DEL, cell.effect_param & 0x0f),
             _ => false,
@@ -778,14 +1058,86 @@ fn map_mod_effect(cell: Cell, timing_tpo: Option<u8>, step: &mut Step) -> bool {
     }
 }
 
-fn map_s3m_effect(cell: S3mCell, timing_tpo: Option<u8>, step: &mut Step) -> bool {
+fn map_s3m_effect(
+    cell: S3mCell,
+    timing: TimingContext,
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    current_velocity: &mut u8,
+    volume_slide_memory: &mut u8,
+    vibrato_memory: &mut u8,
+    pitch_slide_memory: &mut PitchSlideMemory,
+    used_table_effect: &mut bool,
+) -> bool {
     match cell.command {
         0 => true,
-        1 | 20 => timing_tpo
+        1 | 20 => timing
+            .tpo
             .map(|tempo| push_fx(step, FX_TPO, tempo))
             .unwrap_or(false),
+        4 => {
+            let start = if step.velocity == EMPTY {
+                *current_velocity
+            } else {
+                step.velocity
+            };
+            map_volume_slide(
+                step,
+                table_allocator,
+                tables,
+                start,
+                cell.info,
+                timing.speed,
+                current_velocity,
+                volume_slide_memory,
+                used_table_effect,
+            )
+        }
+        5 => map_pitch_slide(
+            step,
+            table_allocator,
+            tables,
+            cell.info,
+            timing.speed,
+            false,
+            pitch_slide_memory,
+            used_table_effect,
+        ),
+        6 => map_pitch_slide(
+            step,
+            table_allocator,
+            tables,
+            cell.info,
+            timing.speed,
+            true,
+            pitch_slide_memory,
+            used_table_effect,
+        ),
+        8 | 21 => map_vibrato(step, cell.info, vibrato_memory),
         10 => push_fx(step, FX_ARP, cell.info),
+        11 => {
+            let vibrato_mapped = map_vibrato(step, 0, vibrato_memory);
+            let start = if step.velocity == EMPTY {
+                *current_velocity
+            } else {
+                step.velocity
+            };
+            let volume_mapped = map_volume_slide(
+                step,
+                table_allocator,
+                tables,
+                start,
+                cell.info,
+                timing.speed,
+                current_velocity,
+                volume_slide_memory,
+                used_table_effect,
+            );
+            vibrato_mapped && volume_mapped
+        }
         15 => push_fx(step, FX_SAMPLER_STA, cell.info),
+        17 => push_fx(step, FX_RET, cell.info),
         19 => match cell.info >> 4 {
             0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.info & 0x0f) * 17),
             0x0c => push_fx(step, FX_KIL, cell.info & 0x0f),
@@ -794,6 +1146,205 @@ fn map_s3m_effect(cell: S3mCell, timing_tpo: Option<u8>, step: &mut Step) -> boo
         },
         _ => false,
     }
+}
+
+fn map_volume_slide(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    start_velocity: u8,
+    param: u8,
+    ticks: u8,
+    current_velocity: &mut u8,
+    volume_slide_memory: &mut u8,
+    used_table_effect: &mut bool,
+) -> bool {
+    let param = if param == 0 {
+        *volume_slide_memory
+    } else {
+        *volume_slide_memory = param;
+        param
+    };
+    if param == 0 {
+        return true;
+    }
+    if start_velocity == EMPTY {
+        return true;
+    }
+
+    if is_s3m_fine_volume_slide(param) {
+        return map_fine_volume_slide(step, param & 0x0f, current_velocity, param >> 4 != 0x0f);
+    }
+
+    let up = param >> 4;
+    let down = param & 0x0f;
+    let delta = if up != 0 && down == 0 {
+        positive_delta(up.saturating_mul(4))
+    } else if down != 0 && up == 0 {
+        negative_delta(down.saturating_mul(4))
+    } else {
+        return false;
+    };
+
+    let rows = tracker_effect_rows(ticks);
+    if rows == 0 {
+        return true;
+    }
+    *current_velocity = stepped_value(start_velocity, delta, rows as usize - 1);
+
+    map_table(
+        step,
+        table_allocator,
+        tables,
+        TableSpec::VolumeSlide { delta, rows },
+        used_table_effect,
+    )
+}
+
+fn map_pitch_slide(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    amount: u8,
+    speed: u8,
+    upward: bool,
+    memory: &mut PitchSlideMemory,
+    used_table_effect: &mut bool,
+) -> bool {
+    let amount = if amount == 0 {
+        if upward { memory.up } else { memory.down }
+    } else {
+        if upward {
+            memory.up = amount;
+        } else {
+            memory.down = amount;
+        }
+        amount
+    };
+    if amount == 0 {
+        return true;
+    }
+
+    let rows = tracker_effect_rows(speed);
+    if rows == 0 {
+        return true;
+    }
+
+    map_table(
+        step,
+        table_allocator,
+        tables,
+        TableSpec::FineSlide {
+            delta: if upward {
+                positive_delta(amount)
+            } else {
+                negative_delta(amount)
+            },
+            rows,
+        },
+        used_table_effect,
+    )
+}
+
+fn map_table(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    spec: TableSpec,
+    used_table_effect: &mut bool,
+) -> bool {
+    let mapped = table_allocator
+        .allocate(tables, spec)
+        .map(|table| push_fx(step, FX_TBL, table))
+        .unwrap_or(false);
+    if mapped {
+        *used_table_effect = true;
+    }
+    mapped
+}
+
+fn positive_delta(value: u8) -> i8 {
+    value.min(63) as i8
+}
+
+fn negative_delta(value: u8) -> i8 {
+    -(value.min(63) as i8)
+}
+
+fn relative_fx_value(delta: i8) -> u8 {
+    if delta >= 0 {
+        delta as u8
+    } else {
+        0u8.wrapping_sub(delta.unsigned_abs())
+    }
+}
+
+fn map_vibrato(step: &mut Step, param: u8, vibrato_memory: &mut u8) -> bool {
+    let param = if param == 0 {
+        *vibrato_memory
+    } else {
+        *vibrato_memory = param;
+        param
+    };
+    if param == 0 {
+        return true;
+    }
+    push_fx(step, FX_PVB, param)
+}
+
+fn map_fine_volume_slide(
+    step: &mut Step,
+    amount: u8,
+    current_velocity: &mut u8,
+    upward: bool,
+) -> bool {
+    if amount == 0 || *current_velocity == EMPTY {
+        return true;
+    }
+    let delta = if upward {
+        positive_delta(amount.saturating_mul(4))
+    } else {
+        negative_delta(amount.saturating_mul(4))
+    };
+    *current_velocity = stepped_value(*current_velocity, delta, 0);
+    push_fx(step, FX_SAMPLER_VOL, relative_fx_value(delta))
+}
+
+fn is_s3m_fine_volume_slide(param: u8) -> bool {
+    let up = param >> 4;
+    let down = param & 0x0f;
+    (down == 0x0f && up != 0) || (up == 0x0f && down != 0)
+}
+
+fn build_table(table: &mut Table, spec: TableSpec) {
+    match spec {
+        TableSpec::Empty => {}
+        TableSpec::VolumeSlide { delta, rows } => {
+            for step in table.steps.iter_mut().take(rows as usize) {
+                step.fx1 = FX {
+                    command: FX_SAMPLER_VOL,
+                    value: relative_fx_value(delta),
+                };
+            }
+        }
+        TableSpec::FineSlide { delta, rows } => {
+            for step in table.steps.iter_mut().take(rows as usize) {
+                step.fx1 = FX {
+                    command: FX_SAMPLER_FIN,
+                    value: relative_fx_value(delta),
+                };
+            }
+        }
+    }
+}
+
+fn tracker_effect_rows(speed: u8) -> u8 {
+    speed.saturating_sub(1).min(16)
+}
+
+fn stepped_value(start: u8, delta: i8, index: usize) -> u8 {
+    let next = start as i16 + delta as i16 * (index as i16 + 1);
+    next.clamp(0, 255) as u8
 }
 
 fn push_fx(step: &mut Step, command: u8, value: u8) -> bool {
@@ -937,7 +1488,7 @@ fn mod_m8_tempo(module: &Module) -> f32 {
     tracker_rows_to_m8_bpm(speed, tempo)
 }
 
-fn mod_timing_fx(module: &Module) -> HashMap<(usize, usize, usize), u8> {
+fn mod_timing_contexts(module: &Module) -> HashMap<(usize, usize, usize), TimingContext> {
     let mut out = HashMap::new();
     let mut speed = 6;
     let mut tempo = 125;
@@ -948,17 +1499,19 @@ fn mod_timing_fx(module: &Module) -> HashMap<(usize, usize, usize), u8> {
         };
         for (row_index, row) in pattern.rows.iter().enumerate() {
             for (channel, cell) in row.iter().take(module.channel_count).enumerate() {
+                let mut tpo = None;
                 if cell.effect == 0x0f && cell.effect_param != 0 {
                     if cell.effect_param <= 32 {
                         speed = cell.effect_param;
                     } else {
                         tempo = cell.effect_param;
                     }
-                    out.insert(
-                        (order_index, row_index, channel),
-                        tracker_rows_to_m8_tpo(speed, tempo),
-                    );
+                    tpo = Some(tracker_rows_to_m8_tpo(speed, tempo));
                 }
+                out.insert(
+                    (order_index, row_index, channel),
+                    TimingContext { speed, tpo },
+                );
             }
         }
     }
@@ -966,7 +1519,7 @@ fn mod_timing_fx(module: &Module) -> HashMap<(usize, usize, usize), u8> {
     out
 }
 
-fn s3m_timing_fx(module: &S3mModule) -> HashMap<(usize, usize, usize), u8> {
+fn s3m_timing_contexts(module: &S3mModule) -> HashMap<(usize, usize, usize), TimingContext> {
     let mut out = HashMap::new();
     let mut speed = module.initial_speed;
     let mut tempo = module.initial_tempo;
@@ -978,14 +1531,21 @@ fn s3m_timing_fx(module: &S3mModule) -> HashMap<(usize, usize, usize), u8> {
         for (row_index, row) in pattern.rows.iter().enumerate() {
             for source_channel in &module.active_channels {
                 let cell = row[*source_channel];
+                let mut tpo = None;
                 match cell.command {
-                    1 if cell.info != 0 => speed = cell.info,
-                    20 if cell.info != 0 => tempo = cell.info,
-                    _ => continue,
+                    1 if cell.info != 0 => {
+                        speed = cell.info;
+                        tpo = Some(tracker_rows_to_m8_tpo(speed, tempo));
+                    }
+                    20 if cell.info != 0 => {
+                        tempo = cell.info;
+                        tpo = Some(tracker_rows_to_m8_tpo(speed, tempo));
+                    }
+                    _ => {}
                 }
                 out.insert(
                     (order_index, row_index, *source_channel),
-                    tracker_rows_to_m8_tpo(speed, tempo),
+                    TimingContext { speed, tpo },
                 );
             }
         }
