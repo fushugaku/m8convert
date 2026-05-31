@@ -24,7 +24,7 @@ cargo run --bin m8convert -- path/to/song.hvl --out out/m8-song
 cargo run --bin m8convert -- path/to/song.s3m --out out/m8-song
 ```
 
-Extract the generated ZIP at the SD card root. It creates `Bundles/<project>/` with the `*.m8s`, `Samples/`, report, and manifest in the same bundle directory, matching the sample paths written into the M8 song file.
+Place the ZIP contents so the converted song lives in `/Bundles/<ProjectName>/` on the M8 SD card. The ZIP already contains that `Bundles/<ProjectName>/` folder, so extracting it at the SD card root is enough.
 
 ## WebAssembly
 
