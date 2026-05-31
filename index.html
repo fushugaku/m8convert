@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>m8convert</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #f7f7f4;
+        color: #191a1d;
+      }
+
+      main {
+        width: min(920px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 40px 0;
+      }
+
+      h1 {
+        margin: 0 0 24px;
+        font-size: 32px;
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+
+      .panel {
+        border: 1px solid #d7d5ce;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 20px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 650;
+      }
+
+      input,
+      button,
+      a.download-button {
+        font: inherit;
+      }
+
+      input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #c7c5bd;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-bottom: 16px;
+      }
+
+      input[type="file"] {
+        display: block;
+        margin-bottom: 16px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 6px;
+        background: #146c5a;
+        color: white;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      a.download-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: fit-content;
+        border-radius: 6px;
+        background: #146c5a;
+        color: white;
+        padding: 10px 14px;
+        text-decoration: none;
+      }
+
+      pre {
+        overflow: auto;
+        border-radius: 6px;
+        background: #202124;
+        color: #f4f4ed;
+        padding: 16px;
+      }
+
+      a {
+        color: #145f91;
+      }
+
+      .downloads {
+        display: none;
+        margin-top: 18px;
+      }
+
+      .downloads.has-results {
+        display: block;
+      }
+
+      .result-actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+
+      .bundle-note {
+        margin: 0 0 14px;
+        border-left: 3px solid #146c5a;
+        background: #eef5f1;
+        color: #4f5457;
+        font-size: 14px;
+        line-height: 1.45;
+        padding: 10px 12px;
+      }
+
+      .file-list {
+        border-top: 1px solid #dedbd2;
+        padding-top: 10px;
+      }
+
+      .file-list summary {
+        cursor: pointer;
+        color: #4f5457;
+        font-size: 14px;
+        user-select: none;
+      }
+
+      .file-list ul {
+        display: grid;
+        gap: 6px;
+        list-style: none;
+        margin: 10px 0 0;
+        padding: 0;
+      }
+
+      .file-list a {
+        display: block;
+        overflow: hidden;
+        color: #145f91;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>m8convert</h1>
+      <section class="panel">
+        <label for="song-name">Song name</label>
+        <input id="song-name" type="text" maxlength="32" placeholder="Optional M8 project name" />
+
+        <label for="mod-file">Tracker file</label>
+        <input id="mod-file" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" />
+
+        <button id="convert" disabled>Convert</button>
+        <div id="downloads" class="downloads"></div>
+        <pre id="report"></pre>
+      </section>
+    </main>
+
+    <script type="module">
+      import init, { convert_tracker_to_m8_bundle_json } from "./pkg/m8convert.js";
+
+      const fileInput = document.querySelector("#mod-file");
+      const songName = document.querySelector("#song-name");
+      const button = document.querySelector("#convert");
+      const downloads = document.querySelector("#downloads");
+      const report = document.querySelector("#report");
+
+      await init();
+      fileInput.addEventListener("change", () => {
+        button.disabled = !fileInput.files.length;
+      });
+
+      button.addEventListener("click", async () => {
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        button.disabled = true;
+        downloads.replaceChildren();
+        report.textContent = "Converting...";
+
+        try {
+          const input = new Uint8Array(await file.arrayBuffer());
+          const raw = convert_tracker_to_m8_bundle_json(input, songName.value || undefined);
+          const bundle = JSON.parse(raw);
+          const outputFiles = bundle.files.map((output) => ({
+            ...output,
+            bytes: Uint8Array.from(atob(output.data_base64), (char) => char.charCodeAt(0)),
+          }));
+
+          const zipBlob = new Blob([createZip(outputFiles)], { type: "application/zip" });
+          const zipLink = document.createElement("a");
+          zipLink.className = "download-button";
+          zipLink.href = URL.createObjectURL(zipBlob);
+          zipLink.download = `${bundle.project_name || "m8convert-bundle"}.zip`;
+          zipLink.textContent = "Download ZIP";
+
+          const actions = document.createElement("div");
+          actions.className = "result-actions";
+          actions.append(zipLink);
+
+          const bundleNote = document.createElement("p");
+          bundleNote.className = "bundle-note";
+          bundleNote.textContent = `Extract the ZIP at the M8 SD card root. It already contains Bundles/${bundle.project_name}/, so the song and samples land in the folder M8 expects.`;
+
+          const fileList = document.createElement("details");
+          fileList.className = "file-list";
+          const fileSummary = document.createElement("summary");
+          fileSummary.textContent = `Individual files (${outputFiles.length})`;
+          const fileItems = document.createElement("ul");
+          fileList.append(fileSummary, fileItems);
+
+          for (const output of outputFiles) {
+            const blob = new Blob([output.bytes], { type: output.mime_type });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = output.path;
+            link.textContent = output.path;
+            link.title = output.path;
+            const item = document.createElement("li");
+            item.append(link);
+            fileItems.append(item);
+          }
+
+          downloads.classList.add("has-results");
+          downloads.append(actions, bundleNote, fileList);
+          report.textContent = JSON.stringify(bundle.report, null, 2);
+        } catch (error) {
+          report.textContent = String(error);
+        } finally {
+          button.disabled = !fileInput.files.length;
+        }
+      });
+
+      function createZip(files) {
+        const localParts = [];
+        const centralParts = [];
+        let offset = 0;
+
+        for (const file of files) {
+          const nameBytes = new TextEncoder().encode(file.path);
+          const crc = crc32(file.bytes);
+          const localHeader = new Uint8Array(30 + nameBytes.length);
+          const localView = new DataView(localHeader.buffer);
+          localView.setUint32(0, 0x04034b50, true);
+          localView.setUint16(4, 20, true);
+          localView.setUint16(6, 0, true);
+          localView.setUint16(8, 0, true);
+          localView.setUint16(10, dosTime(), true);
+          localView.setUint16(12, dosDate(), true);
+          localView.setUint32(14, crc, true);
+          localView.setUint32(18, file.bytes.length, true);
+          localView.setUint32(22, file.bytes.length, true);
+          localView.setUint16(26, nameBytes.length, true);
+          localHeader.set(nameBytes, 30);
+          localParts.push(localHeader, file.bytes);
+
+          const centralHeader = new Uint8Array(46 + nameBytes.length);
+          const centralView = new DataView(centralHeader.buffer);
+          centralView.setUint32(0, 0x02014b50, true);
+          centralView.setUint16(4, 20, true);
+          centralView.setUint16(6, 20, true);
+          centralView.setUint16(8, 0, true);
+          centralView.setUint16(10, 0, true);
+          centralView.setUint16(12, dosTime(), true);
+          centralView.setUint16(14, dosDate(), true);
+          centralView.setUint32(16, crc, true);
+          centralView.setUint32(20, file.bytes.length, true);
+          centralView.setUint32(24, file.bytes.length, true);
+          centralView.setUint16(28, nameBytes.length, true);
+          centralView.setUint32(42, offset, true);
+          centralHeader.set(nameBytes, 46);
+          centralParts.push(centralHeader);
+
+          offset += localHeader.length + file.bytes.length;
+        }
+
+        const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+        const endHeader = new Uint8Array(22);
+        const endView = new DataView(endHeader.buffer);
+        endView.setUint32(0, 0x06054b50, true);
+        endView.setUint16(8, files.length, true);
+        endView.setUint16(10, files.length, true);
+        endView.setUint32(12, centralSize, true);
+        endView.setUint32(16, offset, true);
+
+        return new Blob([...localParts, ...centralParts, endHeader]);
+      }
+
+      function crc32(bytes) {
+        let crc = 0xffffffff;
+        for (const byte of bytes) {
+          crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff];
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+      }
+
+      const crcTable = Array.from({ length: 256 }, (_, index) => {
+        let value = index;
+        for (let bit = 0; bit < 8; bit += 1) {
+          value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+        }
+        return value >>> 0;
+      });
+
+      function dosTime() {
+        const now = new Date();
+        return (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+      }
+
+      function dosDate() {
+        const now = new Date();
+        return ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+      }
+    </script>
+  </body>
+</html>
