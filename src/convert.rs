@@ -112,7 +112,7 @@ pub fn convert_mod(
         source: source_report(&module),
         m8: m8_export.report,
         notes: vec![
-            "Editable conversion maps MOD order rows to M8 song rows, MOD channels to M8 tracks, and MOD rows to phrases/chains.".to_string(),
+            "Editable conversion simulates MOD pattern flow, maps playback rows to M8 song rows, MOD channels to M8 tracks, and MOD rows to phrases/chains.".to_string(),
             "Samples are exported as unsigned 8-bit mono WAV files with loop metadata when present; M8 song files reference those external samples.".to_string(),
             "ProTracker tick effects are mapped to phrase FX or short M8 tables where possible, including slides, vibrato, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
         ],
@@ -161,8 +161,8 @@ pub fn convert_hvl(
         m8: m8_export.report,
         notes: vec![
             "Experimental editable HVL conversion maps positions to M8 song rows, HVL tracks to chains/phrases, and HVL notes to M8 notes.".to_string(),
-            "HVL instruments are synthesized; this converter approximates them as M8 WavSynth patches and does not render the exact HivelyTracker engine.".to_string(),
-            "HVL track commands and performance-list behavior are listed in unsupported_effects/warnings when they cannot be represented directly.".to_string(),
+            "HVL instruments are synthesized; this converter approximates them as M8 WavSynth patches and maps the first performance-list steps to M8 tables where possible.".to_string(),
+            "HVL track commands are mapped for safe pitch, vibrato, volume, and speed cases; remaining commands are listed in unsupported_effects/warnings.".to_string(),
         ],
     };
 
@@ -222,7 +222,7 @@ pub fn convert_s3m(
         source: s3m_source_report(&module),
         m8: m8_export.report,
         notes: vec![
-            "Experimental editable S3M conversion maps order rows to M8 song rows, enabled S3M channels to M8 tracks, and packed pattern rows to phrases/chains.".to_string(),
+            "Experimental editable S3M conversion simulates pattern flow, maps playback rows to M8 song rows, enabled S3M channels to M8 tracks, and packed pattern rows to phrases/chains.".to_string(),
             format!("PCM instruments are exported as mono WAV files resampled to {M8_SAMPLE_RATE} Hz for M8 playback; AdLib/OPL instruments are reported and skipped."),
             "S3M tick effects are mapped to phrase FX or short M8 tables where possible, including slides, vibrato, and retrigger; remaining commands are listed in unsupported_effects.".to_string(),
         ],

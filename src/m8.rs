@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::convert::ConversionOptions;
 use crate::hvlfile::{HvlInstrument, HvlModule, HvlStep};
-use crate::modfile::{Cell, Module, period_to_note};
-use crate::s3mfile::{S3mCell, S3mModule, s3m_note_to_m8};
+use crate::modfile::{Cell, Module, Pattern, period_to_note};
+use crate::s3mfile::{S3mCell, S3mModule, S3mPattern, s3m_note_to_m8};
 
 const TEMPLATE: &[u8] = include_bytes!("../assets/templates/V6_2EMPTY.m8s");
 const M8_TRACKS: usize = 8;
@@ -26,9 +26,14 @@ const FX_TPO: u8 = 0x18;
 const FX_SAMPLER_FIN: u8 = 0x82;
 const FX_SAMPLER_STA: u8 = 0x84;
 const FX_SAMPLER_PAN: u8 = 0x8d;
+const FX_WAVSYNTH_OSC: u8 = 0x83;
+const FX_WAVSYNTH_SIZ: u8 = 0x84;
+const FX_WAVSYNTH_CUT: u8 = 0x89;
 const TABLE_TICK_PER_TRACKER_TICK: u8 = 0x01;
 const SAMPLER_DEFAULT_AMP: u8 = 0x00;
 const SAMPLER_DEFAULT_DRY: u8 = 0xc0;
+const MAX_PLAYBACK_BLOCKS: usize = 256;
+const MAX_FLOW_VISITS: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum M8Error {
@@ -102,6 +107,26 @@ struct PitchSlideMemory {
     down: u8,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct TonePortamentoState {
+    current_note: Option<u8>,
+    target_note: Option<u8>,
+    speed: u8,
+}
+
+#[derive(Debug, Clone)]
+struct PlaybackBlock {
+    order_index: usize,
+    pattern_id: u8,
+    rows: Vec<PlaybackRow>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlaybackRow {
+    source_row: usize,
+    emit_cells: bool,
+}
+
 impl Default for TimingContext {
     fn default() -> Self {
         Self {
@@ -145,6 +170,260 @@ impl TableAllocator {
     }
 }
 
+fn build_mod_playback_blocks(module: &Module, report: &mut M8Report) -> Vec<PlaybackBlock> {
+    let mut blocks = Vec::new();
+    let mut order_index = 0usize;
+    let mut start_row = 0usize;
+    let mut visits = 0usize;
+    let mut seen_entries: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut loop_start = vec![0usize; module.channel_count];
+    let mut loop_counts: HashMap<(usize, usize, usize), u8> = HashMap::new();
+
+    while order_index < module.orders.len()
+        && blocks.len() < MAX_PLAYBACK_BLOCKS
+        && visits < MAX_FLOW_VISITS
+    {
+        let seen = seen_entries.entry((order_index, start_row)).or_default();
+        if *seen > 0 {
+            report.warnings.push(format!(
+                "MOD playback flow loops back to order {order_index}, row {start_row}; exported one linear pass"
+            ));
+            break;
+        }
+        *seen += 1;
+
+        let pattern_id = module.orders[order_index];
+        let Some(pattern) = module.patterns.get(pattern_id as usize) else {
+            report.warnings.push(format!(
+                "order {order_index}: pattern {pattern_id} is outside parsed pattern data"
+            ));
+            break;
+        };
+
+        let mut rows = Vec::new();
+        let mut row = start_row.min(pattern.rows.len().saturating_sub(1));
+        let mut next_order = order_index + 1;
+        let mut next_start_row = 0usize;
+
+        while row < pattern.rows.len() && visits < MAX_FLOW_VISITS {
+            visits += 1;
+            rows.push(PlaybackRow {
+                source_row: row,
+                emit_cells: true,
+            });
+            let control = mod_row_flow_control(pattern, row, module.channel_count);
+            if control.delay > 0 {
+                for _ in 0..control.delay {
+                    rows.push(PlaybackRow {
+                        source_row: row,
+                        emit_cells: false,
+                    });
+                }
+            }
+
+            for channel in &control.loop_starts {
+                loop_start[*channel] = row;
+            }
+            if let Some((channel, count)) = control.loop_repeat {
+                let key = (order_index, channel, row);
+                let remaining = loop_counts.entry(key).or_insert(count);
+                if *remaining > 0 {
+                    *remaining = remaining.saturating_sub(1);
+                    row = loop_start[channel].min(pattern.rows.len().saturating_sub(1));
+                    continue;
+                }
+            }
+
+            if let Some(target_order) = control.position_jump {
+                next_order = target_order as usize;
+                next_start_row = control.pattern_break.unwrap_or(0).min(63);
+                break;
+            }
+            if let Some(target_row) = control.pattern_break {
+                next_order = order_index + 1;
+                next_start_row = target_row.min(63);
+                break;
+            }
+
+            row += 1;
+        }
+
+        push_playback_rows(&mut blocks, order_index, pattern_id, rows, report, "MOD");
+        order_index = next_order;
+        start_row = next_start_row;
+    }
+
+    if blocks.len() >= MAX_PLAYBACK_BLOCKS {
+        report
+            .warnings
+            .push("MOD playback flow exceeded M8's 256 song rows and was truncated".to_string());
+    }
+    blocks
+}
+
+fn build_s3m_playback_blocks(module: &S3mModule, report: &mut M8Report) -> Vec<PlaybackBlock> {
+    let mut blocks = Vec::new();
+    let mut order_index = 0usize;
+    let mut start_row = 0usize;
+    let mut visits = 0usize;
+    let mut seen_entries: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut loop_start = vec![0usize; 32];
+    let mut loop_counts: HashMap<(usize, usize, usize), u8> = HashMap::new();
+
+    while order_index < module.orders.len()
+        && blocks.len() < MAX_PLAYBACK_BLOCKS
+        && visits < MAX_FLOW_VISITS
+    {
+        let seen = seen_entries.entry((order_index, start_row)).or_default();
+        if *seen > 0 {
+            report.warnings.push(format!(
+                "S3M playback flow loops back to order {order_index}, row {start_row}; exported one linear pass"
+            ));
+            break;
+        }
+        *seen += 1;
+
+        let pattern_id = module.orders[order_index];
+        let Some(pattern) = module.patterns.get(pattern_id as usize) else {
+            report.warnings.push(format!(
+                "order {order_index}: S3M pattern {pattern_id} is outside parsed pattern data"
+            ));
+            break;
+        };
+
+        let mut rows = Vec::new();
+        let mut row = start_row.min(pattern.rows.len().saturating_sub(1));
+        let mut next_order = order_index + 1;
+        let mut next_start_row = 0usize;
+
+        while row < pattern.rows.len() && visits < MAX_FLOW_VISITS {
+            visits += 1;
+            rows.push(PlaybackRow {
+                source_row: row,
+                emit_cells: true,
+            });
+            let control = s3m_row_flow_control(pattern, row);
+            if control.delay > 0 {
+                for _ in 0..control.delay {
+                    rows.push(PlaybackRow {
+                        source_row: row,
+                        emit_cells: false,
+                    });
+                }
+            }
+
+            for channel in &control.loop_starts {
+                loop_start[*channel] = row;
+            }
+            if let Some((channel, count)) = control.loop_repeat {
+                let key = (order_index, channel, row);
+                let remaining = loop_counts.entry(key).or_insert(count);
+                if *remaining > 0 {
+                    *remaining = remaining.saturating_sub(1);
+                    row = loop_start[channel].min(pattern.rows.len().saturating_sub(1));
+                    continue;
+                }
+            }
+
+            if let Some(target_order) = control.position_jump {
+                next_order = target_order as usize;
+                next_start_row = control.pattern_break.unwrap_or(0).min(63);
+                break;
+            }
+            if let Some(target_row) = control.pattern_break {
+                next_order = order_index + 1;
+                next_start_row = target_row.min(63);
+                break;
+            }
+
+            row += 1;
+        }
+
+        push_playback_rows(&mut blocks, order_index, pattern_id, rows, report, "S3M");
+        order_index = next_order;
+        start_row = next_start_row;
+    }
+
+    if blocks.len() >= MAX_PLAYBACK_BLOCKS {
+        report
+            .warnings
+            .push("S3M playback flow exceeded M8's 256 song rows and was truncated".to_string());
+    }
+    blocks
+}
+
+#[derive(Default)]
+struct FlowControl {
+    position_jump: Option<u8>,
+    pattern_break: Option<usize>,
+    delay: u8,
+    loop_starts: Vec<usize>,
+    loop_repeat: Option<(usize, u8)>,
+}
+
+fn mod_row_flow_control(pattern: &Pattern, row: usize, channels: usize) -> FlowControl {
+    let mut control = FlowControl::default();
+    for (channel, cell) in pattern.rows[row].iter().take(channels).copied().enumerate() {
+        match cell.effect {
+            0x0b => control.position_jump = Some(cell.effect_param),
+            0x0d => control.pattern_break = Some(bcd_row(cell.effect_param)),
+            0x0e => match cell.effect_param >> 4 {
+                0x06 if cell.effect_param & 0x0f == 0 => control.loop_starts.push(channel),
+                0x06 => control.loop_repeat = Some((channel, cell.effect_param & 0x0f)),
+                0x0e => control.delay = control.delay.max(cell.effect_param & 0x0f),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    control
+}
+
+fn s3m_row_flow_control(pattern: &S3mPattern, row: usize) -> FlowControl {
+    let mut control = FlowControl::default();
+    for (channel, cell) in pattern.rows[row].iter().copied().enumerate() {
+        match cell.command {
+            2 => control.position_jump = Some(cell.info),
+            3 => control.pattern_break = Some(cell.info.min(63) as usize),
+            19 => match cell.info >> 4 {
+                0x0b if cell.info & 0x0f == 0 => control.loop_starts.push(channel),
+                0x0b => control.loop_repeat = Some((channel, cell.info & 0x0f)),
+                0x0e => control.delay = control.delay.max(cell.info & 0x0f),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    control
+}
+
+fn push_playback_rows(
+    blocks: &mut Vec<PlaybackBlock>,
+    order_index: usize,
+    pattern_id: u8,
+    rows: Vec<PlaybackRow>,
+    report: &mut M8Report,
+    format: &str,
+) {
+    for chunk in rows.chunks(64) {
+        if blocks.len() >= MAX_PLAYBACK_BLOCKS {
+            report.warnings.push(format!(
+                "{format} playback flow produced more than 256 M8 song rows; remaining rows were dropped"
+            ));
+            break;
+        }
+        blocks.push(PlaybackBlock {
+            order_index,
+            pattern_id,
+            rows: chunk.to_vec(),
+        });
+    }
+}
+
+fn bcd_row(value: u8) -> usize {
+    (((value >> 4) as usize) * 10 + (value & 0x0f) as usize).min(63)
+}
+
 pub fn export_editable_m8(
     module: &Module,
     options: &ConversionOptions,
@@ -165,6 +444,7 @@ pub fn export_editable_m8(
     clear_song(&mut song);
     install_sampler_instruments(&mut song, module);
 
+    let playback_blocks = build_mod_playback_blocks(module, &mut report);
     let timing_contexts = mod_timing_contexts(module);
     let mut table_allocator = TableAllocator::new();
     let mut phrase_cache: HashMap<[PackedStep; M8_PHRASE_ROWS], u8> = HashMap::new();
@@ -176,13 +456,11 @@ pub fn export_editable_m8(
     let mut volume_slide_memory = vec![0u8; module.channel_count];
     let mut vibrato_memory = vec![0u8; module.channel_count];
     let mut pitch_slide_memory = vec![PitchSlideMemory::default(); module.channel_count];
+    let mut tone_portamento = vec![TonePortamentoState::default(); module.channel_count];
     let mut active_table_effects = vec![false; module.channel_count];
 
-    for (order_index, pattern_id) in module.orders.iter().enumerate() {
-        let Some(pattern) = module.patterns.get(*pattern_id as usize) else {
-            report.warnings.push(format!(
-                "order {order_index}: pattern {pattern_id} is outside parsed pattern data"
-            ));
+    for (playback_index, block) in playback_blocks.iter().enumerate() {
+        let Some(pattern) = module.patterns.get(block.pattern_id as usize) else {
             continue;
         };
 
@@ -195,18 +473,28 @@ pub fn export_editable_m8(
                 phrase.clear();
 
                 for row_in_chunk in 0..M8_PHRASE_ROWS {
-                    let row = chunk * M8_PHRASE_ROWS + row_in_chunk;
-                    let cell = pattern.rows[row][channel];
+                    let Some(playback_row) = block
+                        .rows
+                        .get(chunk * M8_PHRASE_ROWS + row_in_chunk)
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    let cell = if playback_row.emit_cells {
+                        pattern.rows[playback_row.source_row][channel]
+                    } else {
+                        silent_mod_cell()
+                    };
                     let step = convert_cell(
                         module,
                         cell,
                         &mut current_instruments[channel],
-                        order_index,
-                        *pattern_id,
-                        row,
+                        block.order_index,
+                        block.pattern_id,
+                        playback_row.source_row,
                         channel,
                         timing_contexts
-                            .get(&(order_index, row, channel))
+                            .get(&(block.order_index, playback_row.source_row, channel))
                             .copied()
                             .unwrap_or_default(),
                         &mut table_allocator,
@@ -215,6 +503,7 @@ pub fn export_editable_m8(
                         &mut volume_slide_memory[channel],
                         &mut vibrato_memory[channel],
                         &mut pitch_slide_memory[channel],
+                        &mut tone_portamento[channel],
                         &mut active_table_effects[channel],
                         &mut report,
                     );
@@ -260,7 +549,7 @@ pub fn export_editable_m8(
                 id
             };
 
-            let song_index = order_index * M8_TRACKS + channel;
+            let song_index = playback_index * M8_TRACKS + channel;
             if song_index < song.song.steps.len() {
                 song.song.steps[song_index] = chain_id;
             }
@@ -322,6 +611,7 @@ pub fn export_hvl_editable_m8(
 
     clear_song(&mut song);
     install_hvl_wavsynth_instruments(&mut song, module);
+    let hvl_table_ids = install_hvl_performance_tables(&mut song, module);
 
     let mut phrase_cache: HashMap<[PackedStep; M8_PHRASE_ROWS], u8> = HashMap::new();
     let mut chain_cache: HashMap<[(u8, u8); 4], u8> = HashMap::new();
@@ -357,6 +647,7 @@ pub fn export_hvl_editable_m8(
                         track_id,
                         row,
                         channel,
+                        &hvl_table_ids,
                         &mut report,
                     );
                     packed[row_in_chunk] = pack_step(&step);
@@ -463,7 +754,9 @@ pub fn export_s3m_editable_m8(
     clear_song(&mut song);
     install_s3m_sampler_instruments(&mut song, module, &mut report);
 
+    let playback_blocks = build_s3m_playback_blocks(module, &mut report);
     let timing_contexts = s3m_timing_contexts(module);
+    let global_volume_contexts = s3m_global_volume_contexts(module);
     let mut table_allocator = TableAllocator::new();
     let mut phrase_cache: HashMap<[PackedStep; M8_PHRASE_ROWS], u8> = HashMap::new();
     let mut chain_cache: HashMap<[u8; 4], u8> = HashMap::new();
@@ -474,13 +767,16 @@ pub fn export_s3m_editable_m8(
     let mut volume_slide_memory = vec![0u8; module.active_channels.len()];
     let mut vibrato_memory = vec![0u8; module.active_channels.len()];
     let mut pitch_slide_memory = vec![PitchSlideMemory::default(); module.active_channels.len()];
+    let mut tone_portamento = vec![TonePortamentoState::default(); module.active_channels.len()];
+    let mut current_pans = module
+        .active_channels
+        .iter()
+        .map(|channel| module.channel_pans.get(*channel).copied().unwrap_or(0x80))
+        .collect::<Vec<_>>();
     let mut active_table_effects = vec![false; module.active_channels.len()];
 
-    for (order_index, pattern_id) in module.orders.iter().enumerate() {
-        let Some(pattern) = module.patterns.get(*pattern_id as usize) else {
-            report.warnings.push(format!(
-                "order {order_index}: S3M pattern {pattern_id} is outside parsed pattern data"
-            ));
+    for (playback_index, block) in playback_blocks.iter().enumerate() {
+        let Some(pattern) = module.patterns.get(block.pattern_id as usize) else {
             continue;
         };
 
@@ -492,26 +788,42 @@ pub fn export_s3m_editable_m8(
                 phrase.clear();
 
                 for row_in_chunk in 0..M8_PHRASE_ROWS {
-                    let row = chunk * M8_PHRASE_ROWS + row_in_chunk;
-                    let cell = pattern.rows[row][*source_channel];
+                    let Some(playback_row) = block
+                        .rows
+                        .get(chunk * M8_PHRASE_ROWS + row_in_chunk)
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    let cell = if playback_row.emit_cells {
+                        pattern.rows[playback_row.source_row][*source_channel]
+                    } else {
+                        S3mCell::EMPTY
+                    };
                     let step = convert_s3m_cell(
                         module,
                         cell,
                         &mut current_instruments[track],
-                        order_index,
-                        *pattern_id,
-                        row,
+                        block.order_index,
+                        block.pattern_id,
+                        playback_row.source_row,
                         *source_channel,
                         timing_contexts
-                            .get(&(order_index, row, *source_channel))
+                            .get(&(block.order_index, playback_row.source_row, *source_channel))
                             .copied()
                             .unwrap_or_default(),
+                        global_volume_contexts
+                            .get(&(block.order_index, playback_row.source_row))
+                            .copied()
+                            .unwrap_or(module.global_volume),
                         &mut table_allocator,
                         &mut song.tables,
                         &mut current_velocities[track],
                         &mut volume_slide_memory[track],
                         &mut vibrato_memory[track],
                         &mut pitch_slide_memory[track],
+                        &mut tone_portamento[track],
+                        &mut current_pans[track],
                         &mut active_table_effects[track],
                         &mut report,
                     );
@@ -557,7 +869,7 @@ pub fn export_s3m_editable_m8(
                 id
             };
 
-            let song_index = order_index * M8_TRACKS + track;
+            let song_index = playback_index * M8_TRACKS + track;
             if song_index < song.song.steps.len() {
                 song.song.steps[song_index] = chain_id;
             }
@@ -666,6 +978,54 @@ fn install_hvl_wavsynth_instruments(song: &mut Song, module: &HvlModule) {
     }
 }
 
+fn install_hvl_performance_tables(song: &mut Song, module: &HvlModule) -> Vec<Option<u8>> {
+    let mut table_ids = vec![None; module.instruments.len().min(Song::N_TABLES)];
+    for (index, instrument) in module.instruments.iter().enumerate().take(Song::N_TABLES) {
+        if instrument.plist.is_empty() {
+            continue;
+        }
+        let mut table = song.tables[index].clone();
+        table.clear();
+        for (row, entry) in instrument.plist.iter().take(16).enumerate() {
+            let step = &mut table.steps[row];
+            step.fx1 = FX {
+                command: FX_WAVSYNTH_OSC,
+                value: hvl_plist_waveform(entry.waveform),
+            };
+            if entry.note != 0 {
+                step.transpose = entry.note;
+            }
+            if entry.fx[0] == 0x0f {
+                step.fx2 = FX {
+                    command: FX_WAVSYNTH_SIZ,
+                    value: entry.fx_param[0].max(1),
+                };
+            } else if entry.fx[0] == 0x04 {
+                step.fx2 = FX {
+                    command: FX_WAVSYNTH_CUT,
+                    value: entry.fx_param[0],
+                };
+            }
+        }
+        if !table.is_empty() {
+            song.tables[index] = table;
+            table_ids[index] = Some(index as u8);
+        }
+    }
+    table_ids
+}
+
+fn hvl_plist_waveform(waveform: u8) -> u8 {
+    match waveform & 0x07 {
+        0 => WavShape::TRIANGLE.into(),
+        1 => WavShape::SAW.into(),
+        2 => WavShape::PULSE50.into(),
+        3 => WavShape::NOISE_PITCHED.into(),
+        4 => WavShape::SINE.into(),
+        _ => WavShape::PULSE25.into(),
+    }
+}
+
 fn install_s3m_sampler_instruments(song: &mut Song, module: &S3mModule, report: &mut M8Report) {
     for (index, sample) in module
         .instruments
@@ -745,6 +1105,7 @@ fn convert_cell(
     volume_slide_memory: &mut u8,
     vibrato_memory: &mut u8,
     pitch_slide_memory: &mut PitchSlideMemory,
+    tone_portamento: &mut TonePortamentoState,
     active_table_effect: &mut bool,
     report: &mut M8Report,
 ) -> Step {
@@ -754,6 +1115,18 @@ fn convert_cell(
 
     let mut step = empty_step();
     if let Some(note) = period_to_note(cell.period) {
+        if is_mod_tone_portamento(cell) {
+            tone_portamento.target_note = Some(note);
+        } else {
+            tone_portamento.current_note = Some(note);
+            tone_portamento.target_note = None;
+            tone_portamento.speed = 0;
+            pitch_slide_memory.up = 0;
+            pitch_slide_memory.down = 0;
+        }
+    }
+
+    if let Some(note) = period_to_note(cell.period).filter(|_| !is_mod_tone_portamento(cell)) {
         step.note = Note(note);
         step.instrument = *current_instrument;
         step.velocity = velocity_for_cell(module, cell, *current_instrument);
@@ -774,6 +1147,7 @@ fn convert_cell(
         volume_slide_memory,
         vibrato_memory,
         pitch_slide_memory,
+        tone_portamento,
         &mut used_table_effect,
     );
     update_active_table_effect(
@@ -805,9 +1179,13 @@ fn convert_hvl_step(
     track: usize,
     row: usize,
     channel: usize,
+    hvl_table_ids: &[Option<u8>],
     report: &mut M8Report,
 ) -> Step {
-    if source.fx != 0 {
+    let mut step = empty_step();
+    let fx_mapped = map_hvl_track_effect(source.fx, source.fx_param, &mut step);
+    let fx_b_mapped = map_hvl_track_effect(source.fx_b, source.fx_b_param, &mut step);
+    if source.fx != 0 && !fx_mapped {
         report.unsupported_effects.push(UnsupportedEffect {
             order: position,
             pattern: track as u8,
@@ -817,7 +1195,7 @@ fn convert_hvl_step(
             param: source.fx_param,
         });
     }
-    if source.fx_b != 0 {
+    if source.fx_b != 0 && !fx_b_mapped {
         report.unsupported_effects.push(UnsupportedEffect {
             order: position,
             pattern: track as u8,
@@ -828,7 +1206,6 @@ fn convert_hvl_step(
         });
     }
 
-    let mut step = empty_step();
     if source.note == 0 {
         return step;
     }
@@ -841,11 +1218,37 @@ fn convert_hvl_step(
             .get(step.instrument as usize)
             .map(|instrument| volume_to_velocity(instrument.volume))
             .unwrap_or(0xff);
+        if let Some(Some(table_id)) = hvl_table_ids.get(step.instrument as usize) {
+            push_fx(&mut step, FX_TBL, *table_id);
+        }
     } else {
         step.velocity = 0xff;
     }
 
     step
+}
+
+fn map_hvl_track_effect(command: u8, param: u8, step: &mut Step) -> bool {
+    match command {
+        0 => true,
+        0x01 => push_fx(
+            step,
+            FX_SAMPLER_FIN,
+            relative_fx_value(positive_delta(param)),
+        ),
+        0x02 => push_fx(
+            step,
+            FX_SAMPLER_FIN,
+            relative_fx_value(negative_delta(param)),
+        ),
+        0x04 => push_fx(step, FX_PVB, param),
+        0x0c => {
+            step.velocity = volume_to_velocity(param.min(64));
+            true
+        }
+        0x0f => true,
+        _ => false,
+    }
 }
 
 fn convert_s3m_cell(
@@ -857,12 +1260,15 @@ fn convert_s3m_cell(
     row: usize,
     channel: usize,
     timing: TimingContext,
+    global_volume: u8,
     table_allocator: &mut TableAllocator,
     tables: &mut [Table],
     current_velocity: &mut u8,
     volume_slide_memory: &mut u8,
     vibrato_memory: &mut u8,
     pitch_slide_memory: &mut PitchSlideMemory,
+    tone_portamento: &mut TonePortamentoState,
+    current_pan: &mut u8,
     active_table_effect: &mut bool,
     report: &mut M8Report,
 ) -> Step {
@@ -875,20 +1281,33 @@ fn convert_s3m_cell(
         if note == 0x80 {
             return step;
         }
-        step.instrument = *current_instrument;
-        step.velocity = if cell.volume <= 64 {
-            volume_to_velocity(cell.volume)
+        if is_s3m_tone_portamento(cell) {
+            step.note = Note::default();
+            tone_portamento.target_note = Some(note);
         } else {
-            module
-                .instruments
-                .get(*current_instrument as usize)
-                .map(|sample| volume_to_velocity(sample.volume))
-                .unwrap_or(0xff)
-        };
-        *current_velocity = step.velocity;
+            tone_portamento.current_note = Some(note);
+            tone_portamento.target_note = None;
+            tone_portamento.speed = 0;
+            pitch_slide_memory.up = 0;
+            pitch_slide_memory.down = 0;
+            step.instrument = *current_instrument;
+            step.velocity = if cell.volume <= 64 {
+                volume_to_s3m_velocity(cell.volume, global_volume)
+            } else {
+                module
+                    .instruments
+                    .get(*current_instrument as usize)
+                    .map(|sample| volume_to_s3m_velocity(sample.volume, global_volume))
+                    .unwrap_or(0xff)
+            };
+            *current_velocity = step.velocity;
+        }
     } else if cell.volume <= 64 {
-        step.velocity = volume_to_velocity(cell.volume);
+        step.velocity = volume_to_s3m_velocity(cell.volume, global_volume);
         *current_velocity = step.velocity;
+    }
+    if !step.note.is_empty() && *current_pan != 0x80 {
+        push_fx(&mut step, FX_SAMPLER_PAN, *current_pan);
     }
 
     let mut used_table_effect = false;
@@ -902,6 +1321,8 @@ fn convert_s3m_cell(
         volume_slide_memory,
         vibrato_memory,
         pitch_slide_memory,
+        tone_portamento,
+        current_pan,
         &mut used_table_effect,
     );
     update_active_table_effect(
@@ -966,6 +1387,7 @@ fn map_mod_effect(
     volume_slide_memory: &mut u8,
     vibrato_memory: &mut u8,
     pitch_slide_memory: &mut PitchSlideMemory,
+    tone_portamento: &mut TonePortamentoState,
     used_table_effect: &mut bool,
 ) -> bool {
     match cell.effect {
@@ -990,7 +1412,44 @@ fn map_mod_effect(
             pitch_slide_memory,
             used_table_effect,
         ),
+        0x03 => map_tone_portamento(
+            step,
+            table_allocator,
+            tables,
+            cell.effect_param,
+            timing.speed,
+            tone_portamento,
+            used_table_effect,
+        ),
         0x04 => map_vibrato(step, cell.effect_param, vibrato_memory),
+        0x05 => {
+            let tone_mapped = map_tone_portamento(
+                step,
+                table_allocator,
+                tables,
+                0,
+                timing.speed,
+                tone_portamento,
+                used_table_effect,
+            );
+            let start = if step.velocity == EMPTY {
+                *current_velocity
+            } else {
+                step.velocity
+            };
+            let volume_mapped = map_volume_slide(
+                step,
+                table_allocator,
+                tables,
+                start,
+                cell.effect_param,
+                timing.speed,
+                current_velocity,
+                volume_slide_memory,
+                used_table_effect,
+            );
+            tone_mapped && volume_mapped
+        }
         0x06 => {
             let vibrato_mapped = map_vibrato(step, 0, vibrato_memory);
             let start = if step.velocity == EMPTY {
@@ -1031,6 +1490,7 @@ fn map_mod_effect(
         }
         0x08 => push_fx(step, FX_SAMPLER_PAN, cell.effect_param),
         0x09 => push_fx(step, FX_SAMPLER_STA, cell.effect_param),
+        0x0b | 0x0d => true,
         0x0c => true,
         0x0f => timing
             .tpo
@@ -1047,6 +1507,7 @@ fn map_mod_effect(
                 FX_SAMPLER_FIN,
                 relative_fx_value(negative_delta(cell.effect_param & 0x0f)),
             ),
+            0x06 | 0x0e => true,
             0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.effect_param & 0x0f) * 17),
             0x09 => push_fx(step, FX_RET, (cell.effect_param & 0x0f) << 4),
             0x0a => map_fine_volume_slide(step, cell.effect_param & 0x0f, current_velocity, true),
@@ -1069,10 +1530,13 @@ fn map_s3m_effect(
     volume_slide_memory: &mut u8,
     vibrato_memory: &mut u8,
     pitch_slide_memory: &mut PitchSlideMemory,
+    tone_portamento: &mut TonePortamentoState,
+    current_pan: &mut u8,
     used_table_effect: &mut bool,
 ) -> bool {
     match cell.command {
         0 => true,
+        2 | 3 => true,
         1 | 20 => timing
             .tpo
             .map(|tempo| push_fx(step, FX_TPO, tempo))
@@ -1115,6 +1579,15 @@ fn map_s3m_effect(
             pitch_slide_memory,
             used_table_effect,
         ),
+        7 => map_tone_portamento(
+            step,
+            table_allocator,
+            tables,
+            cell.info,
+            timing.speed,
+            tone_portamento,
+            used_table_effect,
+        ),
         8 | 21 => map_vibrato(step, cell.info, vibrato_memory),
         10 => push_fx(step, FX_ARP, cell.info),
         11 => {
@@ -1137,14 +1610,45 @@ fn map_s3m_effect(
             );
             vibrato_mapped && volume_mapped
         }
+        12 => {
+            let tone_mapped = map_tone_portamento(
+                step,
+                table_allocator,
+                tables,
+                0,
+                timing.speed,
+                tone_portamento,
+                used_table_effect,
+            );
+            let start = if step.velocity == EMPTY {
+                *current_velocity
+            } else {
+                step.velocity
+            };
+            let volume_mapped = map_volume_slide(
+                step,
+                table_allocator,
+                tables,
+                start,
+                cell.info,
+                timing.speed,
+                current_velocity,
+                volume_slide_memory,
+                used_table_effect,
+            );
+            tone_mapped && volume_mapped
+        }
         15 => push_fx(step, FX_SAMPLER_STA, cell.info),
         17 => push_fx(step, FX_RET, cell.info),
         19 => match cell.info >> 4 {
-            0x08 => push_fx(step, FX_SAMPLER_PAN, (cell.info & 0x0f) * 17),
+            0x08 => map_pan(step, (cell.info & 0x0f) * 17, current_pan),
+            0x0b | 0x0e => true,
             0x0c => push_fx(step, FX_KIL, cell.info & 0x0f),
             0x0d => push_fx(step, FX_DEL, cell.info & 0x0f),
             _ => false,
         },
+        22 | 23 => true,
+        24 => map_pan(step, cell.info, current_pan),
         _ => false,
     }
 }
@@ -1249,6 +1753,51 @@ fn map_pitch_slide(
         },
         used_table_effect,
     )
+}
+
+fn map_tone_portamento(
+    step: &mut Step,
+    table_allocator: &mut TableAllocator,
+    tables: &mut [Table],
+    amount: u8,
+    speed: u8,
+    state: &mut TonePortamentoState,
+    used_table_effect: &mut bool,
+) -> bool {
+    if amount != 0 {
+        state.speed = amount;
+    }
+    let Some(current_note) = state.current_note else {
+        return true;
+    };
+    let Some(target_note) = state.target_note else {
+        return true;
+    };
+    if current_note == target_note || state.speed == 0 {
+        return true;
+    }
+
+    let rows = tracker_effect_rows(speed);
+    if rows == 0 {
+        return true;
+    }
+    let delta = if target_note > current_note {
+        positive_delta(state.speed)
+    } else {
+        negative_delta(state.speed)
+    };
+    map_table(
+        step,
+        table_allocator,
+        tables,
+        TableSpec::FineSlide { delta, rows },
+        used_table_effect,
+    )
+}
+
+fn map_pan(step: &mut Step, pan: u8, current_pan: &mut u8) -> bool {
+    *current_pan = pan;
+    push_fx(step, FX_SAMPLER_PAN, pan)
 }
 
 fn map_table(
@@ -1382,6 +1931,19 @@ fn volume_to_velocity(volume: u8) -> u8 {
     ((volume.min(64) as u16 * 255) / 64) as u8
 }
 
+fn volume_to_s3m_velocity(volume: u8, global_volume: u8) -> u8 {
+    let scaled = (volume.min(64) as u16 * global_volume.min(64) as u16) / 64;
+    volume_to_velocity(scaled as u8)
+}
+
+fn is_mod_tone_portamento(cell: Cell) -> bool {
+    matches!(cell.effect, 0x03 | 0x05) && cell.period != 0
+}
+
+fn is_s3m_tone_portamento(cell: S3mCell) -> bool {
+    matches!(cell.command, 7 | 12) && s3m_note_to_m8(cell.note).is_some_and(|note| note != 0x80)
+}
+
 fn sampler_params(volume: u8) -> SynthParams {
     SynthParams {
         volume: volume_to_velocity(volume),
@@ -1439,6 +2001,15 @@ fn empty_step() -> Step {
 
 fn empty_packed_step() -> PackedStep {
     pack_step(&empty_step())
+}
+
+fn silent_mod_cell() -> Cell {
+    Cell {
+        period: 0,
+        sample_number: 0,
+        effect: 0,
+        effect_param: 0,
+    }
 }
 
 fn pack_step(step: &Step) -> PackedStep {
@@ -1557,6 +2128,37 @@ fn s3m_timing_contexts(module: &S3mModule) -> HashMap<(usize, usize, usize), Tim
     out
 }
 
+fn s3m_global_volume_contexts(module: &S3mModule) -> HashMap<(usize, usize), u8> {
+    let mut out = HashMap::new();
+    let mut global_volume = module.global_volume.min(64);
+
+    for (order_index, pattern_id) in module.orders.iter().enumerate() {
+        let Some(pattern) = module.patterns.get(*pattern_id as usize) else {
+            continue;
+        };
+        for (row_index, row) in pattern.rows.iter().enumerate() {
+            for cell in row {
+                match cell.command {
+                    22 => global_volume = cell.info.min(64),
+                    23 => {
+                        let up = cell.info >> 4;
+                        let down = cell.info & 0x0f;
+                        if up != 0 && down == 0 {
+                            global_volume = global_volume.saturating_add(up).min(64);
+                        } else if down != 0 && up == 0 {
+                            global_volume = global_volume.saturating_sub(down);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            out.insert((order_index, row_index), global_volume);
+        }
+    }
+
+    out
+}
+
 fn tracker_rows_to_m8_bpm(speed: u8, tempo: u8) -> f32 {
     let speed = speed.max(1) as f32;
     let tempo = tempo.max(32) as f32;
@@ -1653,4 +2255,126 @@ fn truncate_ascii(value: &str, max_len: usize) -> String {
         .filter(|ch| ch.is_ascii() && !ch.is_ascii_control())
         .take(max_len)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modfile::{Pattern, Sample};
+    use crate::s3mfile::{S3mInstrument, S3mPattern};
+
+    #[test]
+    fn mod_flow_break_starts_next_pattern_at_requested_row() {
+        let mut module = test_mod_module();
+        module.orders = vec![0, 1];
+        module.pattern_count = 2;
+        module.patterns.push(empty_mod_pattern(4));
+        module.patterns[0].rows[3][0] = Cell {
+            effect: 0x0d,
+            effect_param: 0x12,
+            ..empty_mod_cell()
+        };
+
+        let mut report = M8Report::default();
+        let blocks = build_mod_playback_blocks(&module, &mut report);
+        assert_eq!(source_rows(&blocks[0].rows[..4]), vec![0, 1, 2, 3]);
+        assert_eq!(blocks[1].pattern_id, 1);
+        assert_eq!(blocks[1].rows[0].source_row, 12);
+    }
+
+    #[test]
+    fn s3m_flow_delay_repeats_source_row() {
+        let mut module = test_s3m_module();
+        module.patterns[0].rows[2][0] = S3mCell {
+            command: 19,
+            info: 0xe2,
+            ..S3mCell::EMPTY
+        };
+
+        let mut report = M8Report::default();
+        let blocks = build_s3m_playback_blocks(&module, &mut report);
+        assert_eq!(source_rows(&blocks[0].rows[..6]), vec![0, 1, 2, 2, 2, 3]);
+        assert!(blocks[0].rows[2].emit_cells);
+        assert!(!blocks[0].rows[3].emit_cells);
+        assert!(!blocks[0].rows[4].emit_cells);
+    }
+
+    #[test]
+    fn s3m_global_volume_scales_velocity() {
+        assert_eq!(volume_to_s3m_velocity(64, 64), 255);
+        assert_eq!(volume_to_s3m_velocity(64, 32), 127);
+    }
+
+    fn test_mod_module() -> Module {
+        Module {
+            title: "test".to_string(),
+            channel_count: 4,
+            restart_position: 0,
+            orders: vec![0],
+            pattern_count: 1,
+            samples: vec![empty_sample(); 31],
+            patterns: vec![empty_mod_pattern(4)],
+            signature: Some("M.K.".to_string()),
+        }
+    }
+
+    fn source_rows(rows: &[PlaybackRow]) -> Vec<usize> {
+        rows.iter().map(|row| row.source_row).collect()
+    }
+
+    fn empty_mod_pattern(channels: usize) -> Pattern {
+        Pattern {
+            rows: vec![vec![empty_mod_cell(); channels]; 64],
+        }
+    }
+
+    fn empty_mod_cell() -> Cell {
+        Cell {
+            period: 0,
+            sample_number: 0,
+            effect: 0,
+            effect_param: 0,
+        }
+    }
+
+    fn empty_sample() -> Sample {
+        Sample {
+            name: String::new(),
+            length_bytes: 0,
+            finetune: 0,
+            volume: 64,
+            loop_start_bytes: 0,
+            loop_length_bytes: 0,
+            data: Vec::new(),
+        }
+    }
+
+    fn test_s3m_module() -> S3mModule {
+        S3mModule {
+            title: "test".to_string(),
+            orders: vec![0],
+            active_channels: vec![0],
+            channel_pans: vec![0x80; 32],
+            instruments: vec![S3mInstrument {
+                kind: 1,
+                name: "sample".to_string(),
+                length: 0,
+                loop_start: 0,
+                loop_end: 0,
+                volume: 64,
+                flags: 0,
+                c5_speed: 8363,
+                pack: 0,
+                data: vec![0],
+            }],
+            patterns: vec![S3mPattern {
+                rows: vec![vec![S3mCell::EMPTY; 32]; 64],
+            }],
+            initial_speed: 6,
+            initial_tempo: 125,
+            global_volume: 64,
+            tracker_version: 0,
+            ffi: 1,
+        }
+    }
 }

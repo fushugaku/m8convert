@@ -23,6 +23,7 @@ pub struct S3mModule {
     pub title: String,
     pub orders: Vec<u8>,
     pub active_channels: Vec<usize>,
+    pub channel_pans: Vec<u8>,
     pub instruments: Vec<S3mInstrument>,
     pub patterns: Vec<S3mPattern>,
     pub initial_speed: u8,
@@ -154,6 +155,7 @@ pub fn parse_s3m(input: &[u8]) -> Result<S3mModule, S3mError> {
     let instrument_paras =
         read_para_table(input, &mut pos, instrument_count, "instrument pointers")?;
     let pattern_paras = read_para_table(input, &mut pos, pattern_count, "pattern pointers")?;
+    let channel_pans = read_channel_pans(input, &mut pos, input[0x35] == 0xfc, channel_settings)?;
 
     let signed_samples = ffi == 1;
     let instruments = instrument_paras
@@ -176,6 +178,7 @@ pub fn parse_s3m(input: &[u8]) -> Result<S3mModule, S3mError> {
         title,
         orders,
         active_channels,
+        channel_pans,
         instruments,
         patterns,
         initial_speed,
@@ -184,6 +187,47 @@ pub fn parse_s3m(input: &[u8]) -> Result<S3mModule, S3mError> {
         tracker_version,
         ffi,
     })
+}
+
+fn read_channel_pans(
+    input: &[u8],
+    pos: &mut usize,
+    has_default_pans: bool,
+    channel_settings: &[u8],
+) -> Result<Vec<u8>, S3mError> {
+    if has_default_pans {
+        let bytes = input
+            .get(*pos..*pos + S3M_CHANNELS)
+            .ok_or(S3mError::Truncated("default channel panning"))?;
+        *pos += S3M_CHANNELS;
+        Ok(bytes
+            .iter()
+            .enumerate()
+            .map(|(channel, value)| {
+                if value & 0x20 != 0 {
+                    (value & 0x0f) * 17
+                } else {
+                    default_channel_pan(channel_settings[channel])
+                }
+            })
+            .collect())
+    } else {
+        Ok(channel_settings
+            .iter()
+            .copied()
+            .map(default_channel_pan)
+            .collect())
+    }
+}
+
+fn default_channel_pan(channel_setting: u8) -> u8 {
+    if channel_setting < 8 {
+        0x30
+    } else if channel_setting < 16 {
+        0xc0
+    } else {
+        0x80
+    }
 }
 
 pub fn s3m_note_to_m8(note: u8) -> Option<u8> {
@@ -452,6 +496,7 @@ pub(crate) mod tests {
         assert_eq!(module.title, "S3MTEST");
         assert_eq!(module.orders, vec![0]);
         assert_eq!(module.active_channels[0], 0);
+        assert_eq!(module.channel_pans[0], 0x30);
         assert_eq!(module.patterns[0].rows[0][0].note, 0x40);
         assert_eq!(module.instruments[0].data.len(), 4);
     }
