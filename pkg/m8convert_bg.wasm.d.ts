@@ -1,11 +1,32 @@
 /* tslint:disable */
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
+export const __wbg_teensyemulator_free: (a: number, b: number) => void;
+export const analyze_teensy_hex_json: (a: number, b: number) => [number, number, number, number];
 export const convert_mod_to_m8_bundle_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const convert_tracker_to_m8_bundle_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const convert_xm_to_m8_bundle_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const probe_teensy_hex_boot_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const teensyemulator_audio_json: (a: number) => [number, number, number, number];
+export const teensyemulator_clear_sd_image: (a: number) => void;
+export const teensyemulator_display_snapshot_json: (a: number) => [number, number, number, number];
+export const teensyemulator_display_stats_json: (a: number) => [number, number, number, number];
+export const teensyemulator_host_input_json: (a: number) => [number, number, number, number];
+export const teensyemulator_load_sd_image: (a: number, b: number, c: number) => void;
+export const teensyemulator_new: (a: number, b: number) => [number, number, number];
+export const teensyemulator_run_steps_json: (a: number, b: number) => [number, number, number, number];
+export const teensyemulator_run_steps_live_json: (a: number, b: number) => [number, number, number, number];
+export const teensyemulator_sd_card_json: (a: number) => [number, number, number, number];
+export const teensyemulator_sd_image_bytes: (a: number) => [number, number];
+export const teensyemulator_send_host_bytes: (a: number, b: number, c: number) => void;
+export const teensyemulator_send_joypad_state: (a: number, b: number) => number;
+export const teensyemulator_send_note_off: (a: number) => void;
+export const teensyemulator_send_note_on: (a: number, b: number, c: number) => void;
+export const teensyemulator_take_audio_pcm_words: (a: number) => [number, number];
+export const teensyemulator_take_display_slip: (a: number) => [number, number];
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
-export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __externref_table_dealloc: (a: number) => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_start: () => void;

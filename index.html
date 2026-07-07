@@ -210,9 +210,9 @@
 
         <label for="mod-file">Tracker files</label>
         <div class="file-picker">
-          <input id="mod-file" class="file-input" type="file" accept=".mod,.hvl,.s3m,audio/mod,audio/x-mod" multiple />
+          <input id="mod-file" class="file-input" type="file" accept=".mod,.hvl,.s3m,.xm,audio/mod,audio/x-mod" multiple />
           <label class="file-button" for="mod-file">Choose files</label>
-          <span id="file-help" class="file-help">Supported formats: MOD, HVL, S3M</span>
+          <span id="file-help" class="file-help">Supported formats: MOD, HVL, S3M, XM</span>
         </div>
 
         <button id="convert" disabled>Convert</button>
@@ -223,7 +223,7 @@
     </main>
 
     <script type="module">
-      const buildStamp = "20260531-s3m-effective-static-pan";
+      const buildStamp = "20260707-xm";
       const fileInput = document.querySelector("#mod-file");
       const fileHelp = document.querySelector("#file-help");
       const songName = document.querySelector("#song-name");
@@ -253,8 +253,8 @@
             ? `${files[0].name} is ready.`
             : `${files.length} files are ready.`;
         } else {
-          fileHelp.textContent = "Supported formats: MOD, HVL, S3M";
-          status.textContent = "Choose MOD, HVL, or S3M files.";
+          fileHelp.textContent = "Supported formats: MOD, HVL, S3M, XM";
+          status.textContent = "Choose MOD, HVL, S3M, or XM files.";
         }
       };
 
