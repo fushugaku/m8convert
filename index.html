@@ -184,6 +184,14 @@
         padding: 0;
       }
 
+      .file-list li {
+        display: grid;
+        grid-template-columns: 28px minmax(0, 1fr);
+        align-items: center;
+        column-gap: 8px;
+        min-height: 24px;
+      }
+
       .file-list a {
         display: block;
         overflow: hidden;
@@ -192,6 +200,35 @@
         font-size: 13px;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+
+      .sample-play {
+        width: 24px;
+        height: 24px;
+        border: 1px solid #b9c6bf;
+        border-radius: 999px;
+        background: #f6fbf8;
+        color: #146c5a;
+        display: inline-grid;
+        place-items: center;
+        padding: 0;
+        font-size: 11px;
+        line-height: 1;
+      }
+
+      .sample-play:hover {
+        background: #e6f3ed;
+      }
+
+      .sample-play.is-playing {
+        background: #146c5a;
+        color: #ffffff;
+        border-color: #146c5a;
+      }
+
+      .sample-spacer {
+        width: 24px;
+        height: 24px;
       }
 
       .status {
@@ -223,7 +260,7 @@
     </main>
 
     <script type="module">
-      const buildStamp = "20260707-xm";
+      const buildStamp = "20260707-xm-sample-preview";
       const fileInput = document.querySelector("#mod-file");
       const fileHelp = document.querySelector("#file-help");
       const songName = document.querySelector("#song-name");
@@ -237,6 +274,7 @@
       let convertTrackerToM8BundleJson = null;
       let autoSongName = true;
       let activeUrls = [];
+      let samplePreview = null;
 
       const selectedFiles = () => Array.from(fileInput.files || []);
       const hasFile = () => selectedFiles().length > 0;
@@ -359,12 +397,14 @@
           for (const output of outputFiles) {
             const blob = new Blob([output.bytes], { type: output.mime_type });
             const link = document.createElement("a");
-            link.href = objectUrl(blob);
+            const url = objectUrl(blob);
+            link.href = url;
             link.download = output.path;
             link.textContent = output.path;
             link.title = output.path;
             const item = document.createElement("li");
-            item.append(link);
+            const playControl = samplePlayControl(output, url);
+            item.append(playControl, link);
             fileItems.append(item);
           }
 
@@ -495,6 +535,59 @@
         return `${batchReport.converted_files}/${batchReport.selected_files} converted.`;
       }
 
+      function samplePlayControl(output, url) {
+        if (!isSampleAudio(output)) {
+          const spacer = document.createElement("span");
+          spacer.className = "sample-spacer";
+          spacer.setAttribute("aria-hidden", "true");
+          return spacer;
+        }
+
+        const play = document.createElement("button");
+        play.type = "button";
+        play.className = "sample-play";
+        play.textContent = ">";
+        play.title = `Play ${output.path}`;
+        play.setAttribute("aria-label", `Play ${output.path}`);
+        play.addEventListener("click", () => toggleSamplePreview(play, url, output.path));
+        return play;
+      }
+
+      function isSampleAudio(output) {
+        return output.mime_type === "audio/wav" || output.path.toLowerCase().endsWith(".wav");
+      }
+
+      function toggleSamplePreview(button, url, path) {
+        if (samplePreview?.button === button) {
+          stopSamplePreview();
+          return;
+        }
+
+        stopSamplePreview();
+        const audio = new Audio(url);
+        samplePreview = { audio, button };
+        button.classList.add("is-playing");
+        button.textContent = "||";
+        button.title = `Stop ${path}`;
+        button.setAttribute("aria-label", `Stop ${path}`);
+
+        audio.addEventListener("ended", stopSamplePreview, { once: true });
+        audio.addEventListener("error", stopSamplePreview, { once: true });
+        audio.play().catch(stopSamplePreview);
+      }
+
+      function stopSamplePreview() {
+        if (!samplePreview) return;
+        const { audio, button } = samplePreview;
+        audio.pause();
+        audio.currentTime = 0;
+        button.classList.remove("is-playing");
+        button.textContent = ">";
+        button.title = button.title.replace(/^Stop /, "Play ");
+        button.setAttribute("aria-label", button.getAttribute("aria-label").replace(/^Stop /, "Play "));
+        samplePreview = null;
+      }
+
       function objectUrl(blob) {
         const url = URL.createObjectURL(blob);
         activeUrls.push(url);
@@ -502,6 +595,7 @@
       }
 
       function clearDownloads() {
+        stopSamplePreview();
         for (const url of activeUrls) {
           URL.revokeObjectURL(url);
         }
