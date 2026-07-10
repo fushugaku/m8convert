@@ -22,6 +22,7 @@ pub enum S3mError {
 pub struct S3mModule {
     pub title: String,
     pub orders: Vec<u8>,
+    pub restart_position: Option<u8>,
     pub active_channels: Vec<usize>,
     pub channel_pans: Vec<u8>,
     pub instruments: Vec<S3mInstrument>,
@@ -31,6 +32,8 @@ pub struct S3mModule {
     pub global_volume: u8,
     pub tracker_version: u16,
     pub ffi: u16,
+    #[serde(default)]
+    pub pan_command_uses_8bit: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +47,28 @@ pub struct S3mInstrument {
     pub flags: u8,
     pub c5_speed: u32,
     pub pack: u8,
+    pub default_pan: Option<u8>,
+    pub amp_envelope: Option<S3mAmpEnvelope>,
+    pub auto_vibrato: Option<S3mAutoVibrato>,
     pub data: Vec<i16>,
+    #[serde(default)]
+    pub right_data: Option<Vec<i16>>,
+    #[serde(default)]
+    pub ping_pong_loop: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct S3mAmpEnvelope {
+    pub amount: u8,
+    pub attack: u8,
+    pub hold: u8,
+    pub decay: u8,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct S3mAutoVibrato {
+    pub speed: u8,
+    pub depth: u8,
 }
 
 impl S3mInstrument {
@@ -61,7 +85,7 @@ impl S3mInstrument {
     }
 
     pub fn is_stereo(&self) -> bool {
-        self.flags & 0x02 != 0
+        self.right_data.is_some()
     }
 }
 
@@ -177,6 +201,7 @@ pub fn parse_s3m(input: &[u8]) -> Result<S3mModule, S3mError> {
     Ok(S3mModule {
         title,
         orders,
+        restart_position: None,
         active_channels,
         channel_pans,
         instruments,
@@ -186,6 +211,7 @@ pub fn parse_s3m(input: &[u8]) -> Result<S3mModule, S3mError> {
         global_volume,
         tracker_version,
         ffi,
+        pan_command_uses_8bit: false,
     })
 }
 
@@ -239,9 +265,19 @@ pub fn s3m_pan_nibble_to_m8(value: u8) -> u8 {
     }
 }
 
+pub fn s3m_command_pan_to_m8(value: u8, uses_8bit_range: bool) -> u8 {
+    if uses_8bit_range {
+        value
+    } else if value <= 0x80 {
+        ((u16::from(value) * 255 + 64) / 128) as u8
+    } else {
+        0x80
+    }
+}
+
 pub fn s3m_note_to_m8(note: u8) -> Option<u8> {
     match note {
-        0x00 | 0xff => None,
+        0xff => None,
         0xfe => Some(0x80),
         value => {
             let octave = value >> 4;
@@ -292,11 +328,16 @@ fn parse_instrument(
             flags: raw.flags,
             c5_speed: raw.c5_speed,
             pack: raw.pack,
+            default_pan: None,
+            amp_envelope: None,
+            auto_vibrato: None,
             data: Vec::new(),
+            right_data: None,
+            ping_pong_loop: false,
         });
     }
 
-    let data = decode_sample(input, &raw, signed_samples);
+    let (data, right_data) = decode_sample(input, &raw, signed_samples);
     Ok(S3mInstrument {
         kind: raw.kind,
         name: raw.name,
@@ -307,7 +348,12 @@ fn parse_instrument(
         flags: raw.flags,
         c5_speed: raw.c5_speed,
         pack: raw.pack,
+        default_pan: None,
+        amp_envelope: None,
+        auto_vibrato: None,
         data,
+        right_data,
+        ping_pong_loop: false,
     })
 }
 
@@ -368,7 +414,11 @@ fn parse_pattern(input: &[u8], offset: usize) -> Result<S3mPattern, S3mError> {
     Ok(pattern)
 }
 
-fn decode_sample(input: &[u8], instrument: &RawInstrument, signed_samples: bool) -> Vec<i16> {
+fn decode_sample(
+    input: &[u8],
+    instrument: &RawInstrument,
+    signed_samples: bool,
+) -> (Vec<i16>, Option<Vec<i16>>) {
     let is_16bit = instrument.flags & 0x04 != 0;
     let is_stereo = instrument.flags & 0x02 != 0;
     let bytes_per_sample = if is_16bit { 2 } else { 1 };
@@ -377,7 +427,7 @@ fn decode_sample(input: &[u8], instrument: &RawInstrument, signed_samples: bool)
     let Some(raw) =
         input.get(instrument.sample_offset..instrument.sample_offset.saturating_add(needed))
     else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
 
     let left_len = instrument.length as usize * bytes_per_sample;
@@ -388,15 +438,9 @@ fn decode_sample(input: &[u8], instrument: &RawInstrument, signed_samples: bool)
         &[][..]
     };
 
-    let mut left_pcm = decode_pcm_channel(left, is_16bit, signed_samples);
-    if is_stereo {
-        let right_pcm = decode_pcm_channel(right, is_16bit, signed_samples);
-        for (index, sample) in left_pcm.iter_mut().enumerate() {
-            let right = *right_pcm.get(index).unwrap_or(&0) as i32;
-            *sample = (((*sample as i32) + right) / 2) as i16;
-        }
-    }
-    left_pcm
+    let left_pcm = decode_pcm_channel(left, is_16bit, signed_samples);
+    let right_pcm = is_stereo.then(|| decode_pcm_channel(right, is_16bit, signed_samples));
+    (left_pcm, right_pcm)
 }
 
 fn decode_pcm_channel(input: &[u8], is_16bit: bool, signed_samples: bool) -> Vec<i16> {
@@ -443,7 +487,12 @@ fn empty_instrument() -> S3mInstrument {
         flags: 0,
         c5_speed: 8363,
         pack: 0,
+        default_pan: None,
+        amp_envelope: None,
+        auto_vibrato: None,
         data: Vec::new(),
+        right_data: None,
+        ping_pong_loop: false,
     }
 }
 
@@ -497,6 +546,34 @@ fn decode_fixed_string(bytes: &[u8]) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_lowest_s3m_note_and_scales_native_x_panning() {
+        assert_eq!(s3m_note_to_m8(0x00), Some(0));
+        assert_eq!(s3m_note_to_m8(0xff), None);
+        assert_eq!(s3m_command_pan_to_m8(0x40, false), 0x80);
+        assert_eq!(s3m_command_pan_to_m8(0x40, true), 0x40);
+    }
+
+    #[test]
+    fn stereo_sample_decoder_keeps_left_and_right_channels_separate() {
+        let instrument = RawInstrument {
+            kind: 1,
+            name: "stereo".to_string(),
+            length: 2,
+            loop_start: 0,
+            loop_end: 0,
+            volume: 64,
+            flags: 0x02,
+            c5_speed: 8363,
+            pack: 0,
+            sample_offset: 0,
+        };
+        let (left, right) = decode_sample(&[0, 255, 255, 0], &instrument, false);
+
+        assert_eq!(left, vec![i16::MIN, 32_512]);
+        assert_eq!(right, Some(vec![32_512, i16::MIN]));
+    }
 
     #[test]
     fn parses_minimal_s3m() {

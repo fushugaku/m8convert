@@ -1,0 +1,2132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>m8convert Teensy emulator</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      @font-face {
+        font-family: "M8Stealth";
+        src: url("./vendor/m8webdisplay/m8stealth57.woff2") format("woff2");
+      }
+
+      @font-face {
+        font-family: "M8StealthBig";
+        src: url("./vendor/m8webdisplay/m8stealth89.woff2") format("woff2");
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #f6f7f4;
+        color: #191a1d;
+      }
+
+      main {
+        width: min(1120px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 40px 0;
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: 32px;
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+
+      .topbar a {
+        color: #145f91;
+        font-size: 14px;
+      }
+
+      .panel {
+        border: 1px solid #d7d5ce;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 20px;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .file-input {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+
+      .sd-input {
+        margin-left: 6px;
+      }
+
+      .file-button,
+      button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        border: 0;
+        border-radius: 6px;
+        padding: 10px 14px;
+        color: white;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 650;
+      }
+
+      .file-button {
+        background: #202124;
+      }
+
+      button {
+        background: #146c5a;
+      }
+
+      button.secondary {
+        background: #405167;
+      }
+
+      button.active {
+        background: #a14f0f;
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .file-help,
+      .status {
+        color: #4f5457;
+        font-size: 14px;
+      }
+
+      .status {
+        margin: 14px 0 0;
+      }
+
+      .device-status {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .device-item {
+        border: 1px solid #dedbd2;
+        border-radius: 8px;
+        padding: 10px;
+        background: #fbfbf8;
+        font-size: 13px;
+      }
+
+      .device-item span {
+        display: block;
+        color: #64686c;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .device-item strong {
+        display: block;
+        margin-top: 4px;
+      }
+
+      .device-item.ready strong {
+        color: #146c5a;
+      }
+
+      .device-item.pending strong {
+        color: #a14f0f;
+      }
+
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .controls button {
+        min-height: 34px;
+        padding: 7px 10px;
+        background: #202124;
+        font-size: 13px;
+      }
+
+      .controls button.active {
+        background: #146c5a;
+      }
+
+      .summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .metric {
+        border: 1px solid #dedbd2;
+        border-radius: 8px;
+        padding: 12px;
+        min-width: 0;
+      }
+
+      .metric span {
+        display: block;
+        color: #64686c;
+        font-size: 12px;
+        font-weight: 650;
+        text-transform: uppercase;
+      }
+
+      .metric strong {
+        display: block;
+        overflow-wrap: anywhere;
+        margin-top: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 15px;
+      }
+
+      .display-snapshot {
+        margin-top: 18px;
+      }
+
+      .display-snapshot h2 {
+        margin: 0 0 10px;
+        font-size: 18px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      .display-candidates {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 12px;
+      }
+
+      details.display-candidate {
+        min-width: 0;
+        border: 1px solid #dedbd2;
+        border-radius: 8px;
+        padding: 12px;
+      }
+
+      details.display-candidate summary {
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .display-meta,
+      .display-note {
+        margin: 8px 0 0;
+        color: #5d6265;
+        font-size: 12px;
+      }
+
+      .display-pre {
+        min-height: 0;
+        margin-top: 10px;
+        white-space: pre;
+      }
+
+      .m8-screen {
+        display: grid;
+        grid-template-columns: repeat(40, minmax(0, 1fr));
+        width: min(100%, 640px);
+        aspect-ratio: 4 / 3;
+        margin-top: 10px;
+        overflow: hidden;
+        border-radius: 6px;
+        background: #050505;
+        padding: 10px;
+        box-sizing: border-box;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1;
+      }
+
+      .m8-cell {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 0;
+        min-height: 0;
+        color: #d9f4ff;
+      }
+
+      .m8web-stage {
+        position: relative;
+        width: min(100%, 720px);
+        aspect-ratio: 4 / 3;
+        margin-top: 10px;
+        overflow: hidden;
+        border-radius: 6px;
+        background: #000;
+      }
+
+      .m8web-stage canvas,
+      .m8web-stage svg {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        image-rendering: pixelated;
+      }
+
+      .m8web-stage svg text {
+        font-family: "M8Stealth", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 16px;
+      }
+
+      .m8web-stage svg.big text {
+        font-family: "M8StealthBig", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 24px;
+      }
+
+      .live-display {
+        margin-top: 18px;
+      }
+
+      .live-display h2 {
+        margin: 0 0 10px;
+        font-size: 18px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      table {
+        width: 100%;
+        margin-top: 18px;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid #dedbd2;
+        padding: 9px 8px;
+        text-align: left;
+      }
+
+      th {
+        color: #4f5457;
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+
+      td {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      pre {
+        overflow: auto;
+        min-height: 160px;
+        margin: 18px 0 0;
+        border-radius: 6px;
+        background: #202124;
+        color: #f4f4ed;
+        padding: 16px;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="topbar">
+        <h1>Teensy HEX emulator</h1>
+        <a href="./index.html">Converter</a>
+      </div>
+
+      <section class="panel">
+        <div class="toolbar">
+          <input id="hex-file" class="file-input" type="file" accept=".hex,text/plain" />
+          <input id="sd-file" class="file-input" type="file" accept=".img,.bin,application/octet-stream" />
+          <label class="file-button" for="hex-file">Choose HEX</label>
+          <label class="file-button sd-input" for="sd-file">Choose SD IMG</label>
+          <button id="download-sd" class="secondary" disabled>Download SD IMG</button>
+          <button id="audio-toggle" class="secondary" disabled>Enable audio</button>
+          <button id="analyze" disabled>Analyze</button>
+          <button id="probe" class="secondary" disabled>Boot probe</button>
+          <button id="start-live" class="secondary" disabled>Start live</button>
+          <button id="run-live" disabled>Run</button>
+          <button id="step-live" class="secondary" disabled>Step</button>
+          <button id="snapshot-live" class="secondary" disabled>Snapshot</button>
+          <button id="smoke-test" class="secondary" disabled>Smoke test</button>
+          <span id="file-help" class="file-help">No firmware selected.</span>
+        </div>
+        <div id="controls" class="controls"></div>
+        <div id="device-status" class="device-status"></div>
+
+        <p id="status" class="status">Loading emulator core...</p>
+        <div id="display"></div>
+        <div id="summary" class="summary"></div>
+        <div id="segments"></div>
+        <pre id="report"></pre>
+        <script id="m8-smoke-state" type="application/json">{}</script>
+        <script id="m8-smoke-test-result" type="application/json">{"status":"idle"}</script>
+      </section>
+    </main>
+
+    <script type="module">
+      import { Parser as M8WebDisplayParser } from "./vendor/m8webdisplay/js/parser.js?v=20260602-clear-text-rect";
+      import { Renderer as M8WebDisplayRenderer } from "./vendor/m8webdisplay/js/renderer.js?v=20260602-clear-text-rect";
+
+      const buildStamp = new URLSearchParams(window.location.search).get("v") || "20260709-xm-native-timeline";
+      const bootProbeMaxSteps = 15000000;
+      const fileInput = document.querySelector("#hex-file");
+      const sdInput = document.querySelector("#sd-file");
+      const analyzeButton = document.querySelector("#analyze");
+      const probeButton = document.querySelector("#probe");
+      const startLiveButton = document.querySelector("#start-live");
+      const runLiveButton = document.querySelector("#run-live");
+      const stepLiveButton = document.querySelector("#step-live");
+      const snapshotLiveButton = document.querySelector("#snapshot-live");
+      const smokeTestButton = document.querySelector("#smoke-test");
+      const downloadSdButton = document.querySelector("#download-sd");
+      const audioToggleButton = document.querySelector("#audio-toggle");
+      const fileHelp = document.querySelector("#file-help");
+      const status = document.querySelector("#status");
+      const summary = document.querySelector("#summary");
+      const display = document.querySelector("#display");
+      const segments = document.querySelector("#segments");
+      const report = document.querySelector("#report");
+      const controls = document.querySelector("#controls");
+      const deviceStatus = document.querySelector("#device-status");
+
+      let coreReady = false;
+      let busy = false;
+      let queryProbeLoaded = false;
+      let analyzeTeensyHexJson = null;
+      let probeTeensyHexBootJson = null;
+      let emulator = null;
+      let liveWorker = null;
+      let workerRequestId = 0;
+      const workerRequests = new Map();
+      let liveRunning = false;
+      let queryFirmwareLoaded = false;
+      let liveTimer = 0;
+      let joypadState = 0;
+      let m8WebRenderer = null;
+      let m8WebParser = null;
+      let sdImageBytes = null;
+      let sdImageName = "";
+      let queryFirmwareBytes = null;
+      let lastLiveSummary = null;
+      let lastLiveSummaryRenderAt = 0;
+      let displaySlipBytesProcessed = 0;
+      let displaySlipPacketsProcessed = 0;
+      let lastDisplayError = null;
+      let lastJoypadWorkerResult = null;
+      let lastJoypadQueuedAt = 0;
+      let lastJoypadAppliedAt = 0;
+      let liveStepBudget = 250000;
+      let lastLiveTickMs = 0;
+      let audioContext = null;
+      let audioEnabled = false;
+      let audioScheduledAt = 0;
+      let audioQueuedWords = 0;
+      const controlPressStartedAt = new Map();
+      const controlReleaseTimers = new Map();
+      const keyboardHeldActions = new Set();
+      const keyboardImplicitSelectActions = new Set();
+      let joypadInputQueue = Promise.resolve();
+
+      const minLiveStepsPerFrame = 25000;
+      const maxLiveStepsPerFrame = 1000000;
+      const liveTickTargetMs = 32;
+      const autorunStepsPerFrame = 1000000;
+      const liveStartWarmupMaxSteps = Math.max(bootProbeMaxSteps, 30000000);
+      const liveStartWarmupChunkSteps = autorunStepsPerFrame;
+      const minControlPressMs = 350;
+      const inputSettleSteps = 250000;
+      const workerRequestTimeoutMs = 60000;
+      const keyBitMap = {
+        edit: 0,
+        option: 1,
+        right: 2,
+        start: 3,
+        select: 4,
+        down: 5,
+        up: 6,
+        left: 7,
+      };
+      const keyboardMap = {
+        ArrowUp: "up",
+        ArrowDown: "down",
+        ArrowLeft: "left",
+        ArrowRight: "right",
+        ShiftLeft: "select",
+        ShiftRight: "select",
+        Space: "start",
+        KeyZ: "option",
+        KeyX: "edit",
+      };
+      const keyboardKeyMap = {
+        Shift: "select",
+        " ": "start",
+        z: "option",
+        Z: "option",
+        x: "edit",
+        X: "edit",
+      };
+      const directionalActions = new Set(["up", "down", "left", "right"]);
+      const controlGroups = [
+        ["up", "down", "left", "right", "select", "start", "option", "edit"],
+        ["select+up", "select+down", "select+left", "select+right"],
+      ];
+
+      window.__m8convertEmulatorControls = {
+        press: (action) => handleControlInput({ preventDefault() {} }, action, true),
+        release: (action) => handleControlInput({ preventDefault() {} }, action, false),
+        tap: async (action, holdMs = minControlPressMs) => {
+          handleControlInput({ preventDefault() {} }, action, true);
+          await wait(Math.max(minControlPressMs, Number(holdMs) || minControlPressMs));
+          handleControlInput({ preventDefault() {} }, action, false);
+          return joypadInputQueue;
+        },
+        settle: () => joypadInputQueue,
+      };
+
+      const selectedFile = () => fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+      const selectedSdFile = () => sdInput.files && sdInput.files[0] ? sdInput.files[0] : null;
+      const queryFirmwareUrl = () => new URLSearchParams(location.search).get("firmwareUrl");
+
+      const refreshButtons = () => {
+        const hasFile = Boolean(selectedFile());
+        const hasQueryFirmware = Boolean(queryFirmwareUrl());
+        const hasFirmware = hasFile || hasQueryFirmware;
+        analyzeButton.disabled = busy || liveRunning || !coreReady || !hasFirmware;
+        probeButton.disabled = busy || liveRunning || !coreReady || !hasFirmware;
+        startLiveButton.disabled = busy || liveRunning || !coreReady || !hasFirmware;
+        runLiveButton.disabled = busy || !coreReady || !emulator;
+        stepLiveButton.disabled = busy || !coreReady || !emulator || liveRunning;
+        snapshotLiveButton.disabled = busy || !coreReady || !emulator;
+        smokeTestButton.disabled = busy || !coreReady || !emulator || liveRunning;
+        downloadSdButton.disabled = busy || !coreReady || !emulator || !sdImageBytes;
+        const hasWebAudio = Boolean(audioContextConstructor());
+        audioToggleButton.disabled = busy || !coreReady || !emulator || !hasWebAudio;
+        runLiveButton.textContent = liveRunning ? "Pause" : "Run";
+        audioToggleButton.textContent = !hasWebAudio
+          ? "Audio unavailable"
+          : audioEnabled ? "Disable audio" : "Enable audio";
+        audioToggleButton.classList.toggle("active", audioEnabled);
+        runLiveButton.classList.toggle("active", liveRunning);
+        const sdText = sdImageBytes ? ` + SD ${sdImageName} (${formatBytes(sdImageBytes.length)})` : "";
+        const queryName = hasQueryFirmware ? queryFirmwareUrl().split("/").pop() || "URL firmware" : "";
+        fileHelp.textContent = hasFile
+          ? `${selectedFile().name}${sdText}`
+          : hasQueryFirmware
+            ? `${queryName}${sdText}`
+            : "No firmware selected.";
+        if (!coreReady) {
+          status.textContent = "Loading emulator core...";
+        } else if (busy) {
+          status.textContent = "Working...";
+        } else if (hasFile) {
+          status.textContent = "Firmware ready.";
+        } else if (!queryProbeLoaded) {
+          status.textContent = "Choose a Teensy .hex firmware file.";
+        }
+        publishSmokeState();
+      };
+
+      fileInput.addEventListener("change", () => {
+        stopLive();
+        destroyLiveWorker();
+        emulator = null;
+        clearOutput();
+        refreshButtons();
+      });
+
+      sdInput.addEventListener("change", async () => {
+        const file = selectedSdFile();
+        sdImageBytes = file ? new Uint8Array(await file.arrayBuffer()) : null;
+        sdImageName = file ? file.name : "";
+        if (emulator && sdImageBytes) {
+          const result = await callEmulatorWorker("loadSdImage", { bytes: copyBytes(sdImageBytes) });
+          processDisplaySlip(result.displaySlip);
+          processAudioPcmWords(result.audioPcmWords);
+          updateLastSummaryInputState(result.hostInput, result.sdCard, result.audio, result.display);
+        }
+        refreshButtons();
+      });
+
+      try {
+        const module = await import(`./pkg/m8convert.js?v=${buildStamp}`);
+        await module.default({ module_or_path: `./pkg/m8convert_bg.wasm?v=${buildStamp}` });
+        analyzeTeensyHexJson = module.analyze_teensy_hex_json;
+        probeTeensyHexBootJson = module.probe_teensy_hex_boot_json;
+        window.__m8convertModule = module;
+        coreReady = true;
+        refreshButtons();
+        queueMicrotask(loadQueryStateFromUrl);
+      } catch (error) {
+        report.textContent = `Could not load emulator core: ${error}`;
+      } finally {
+        refreshButtons();
+      }
+
+      async function loadQueryStateFromUrl() {
+        try {
+          await maybeLoadProbeJsonFromQuery();
+          await maybeLoadFirmwareFromQuery();
+        } catch (error) {
+          console.error(error);
+          report.textContent = String(error);
+          status.textContent = "Could not load query firmware.";
+        } finally {
+          refreshButtons();
+        }
+      }
+
+      analyzeButton.addEventListener("click", async () => {
+        await runWithFirmware((bytes) => {
+          const analysis = JSON.parse(analyzeTeensyHexJson(bytes));
+          renderAnalysis(analysis);
+          report.textContent = JSON.stringify(analysis, null, 2);
+          return "Analysis complete.";
+        });
+      });
+
+      probeButton.addEventListener("click", async () => {
+        await runWithFirmware(async (bytes) => {
+          status.textContent = `Boot probe running up to ${bootProbeMaxSteps.toLocaleString()} steps...`;
+          report.textContent = "Running boot probe...";
+          await nextFrame();
+          const bootProbe = JSON.parse(probeTeensyHexBootJson(bytes, bootProbeMaxSteps));
+          renderAnalysis(bootProbe.analysis, bootProbe);
+          report.textContent = JSON.stringify(bootProbe, null, 2);
+          return bootProbeStatusText(bootProbe);
+        });
+      });
+
+      startLiveButton.addEventListener("click", async () => {
+        await startLiveSession();
+      });
+
+      runLiveButton.addEventListener("click", async () => {
+        if (!emulator) {
+          await startLiveSession();
+        }
+        if (!emulator) return;
+        liveRunning ? stopLive() : startLiveLoop();
+      });
+
+      stepLiveButton.addEventListener("click", async () => {
+        if (!emulator || liveRunning) return;
+        await runLiveTick(liveStepBudget);
+      });
+
+      snapshotLiveButton.addEventListener("click", async () => {
+        if (!emulator) return;
+        const { snapshot: bootProbe } = await callEmulatorWorker("snapshot");
+        renderAnalysis(bootProbe.analysis, bootProbe);
+        report.textContent = JSON.stringify(bootProbe, null, 2);
+        status.textContent = bootProbeStatusText(bootProbe);
+      });
+
+      smokeTestButton.addEventListener("click", async () => {
+        if (!emulator) return;
+        publishSmokeTestResult({ status: "running", started_at: new Date().toISOString() });
+        refreshButtons();
+        try {
+          const result = await runM8SmokeTest({ action: "down" });
+          publishSmokeTestResult({
+            status: result.passed ? "passed" : "failed",
+            finished_at: new Date().toISOString(),
+            result,
+          });
+        } catch (error) {
+          publishSmokeTestResult({
+            status: "error",
+            finished_at: new Date().toISOString(),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        } finally {
+          refreshButtons();
+        }
+      });
+
+      downloadSdButton.addEventListener("click", async () => {
+        if (!emulator || !sdImageBytes) return;
+        const { bytes } = await callEmulatorWorker("sdImage");
+        const blob = new Blob([bytes], { type: "application/octet-stream" });
+        const link = document.createElement("a");
+        const baseName = sdImageName.replace(/\.[^.]+$/, "") || "m8-sd";
+        link.href = URL.createObjectURL(blob);
+        link.download = `${baseName}-m8convert.img`;
+        link.click();
+        URL.revokeObjectURL(link.href);
+      });
+
+      audioToggleButton.addEventListener("click", async () => {
+        if (audioEnabled) {
+          audioEnabled = false;
+          audioQueuedWords = 0;
+          audioScheduledAt = 0;
+        } else {
+          const AudioContextCtor = audioContextConstructor();
+          if (!AudioContextCtor) {
+            status.textContent = "WebAudio API is not available in this browser.";
+            return;
+          }
+          audioContext ||= new AudioContextCtor({ sampleRate: 44100 });
+          audioEnabled = true;
+          audioScheduledAt = audioContext.currentTime + 0.05;
+          refreshButtons();
+          audioContext.resume?.().catch((error) => {
+            console.warn(error);
+            status.textContent = "Audio output could not be resumed by this browser.";
+          });
+        }
+        refreshButtons();
+        if (lastLiveSummary) {
+          renderLiveSummary(lastLiveSummary);
+        }
+      });
+
+      window.addEventListener("keydown", (event) => handleKeyboardInput(event, true));
+      window.addEventListener("keyup", (event) => handleKeyboardInput(event, false));
+
+      setupControlButtons();
+      window.__m8convertEmulatorState = () => ({
+        coreReady,
+        busy,
+        hasSelectedFile: Boolean(selectedFile()),
+        hasQueryFirmware: Boolean(queryFirmwareUrl()),
+        hasEmulator: Boolean(emulator),
+        liveRunning,
+        queryProbeLoaded,
+        queryFirmwareLoaded,
+        liveStepBudget,
+        lastLiveTickMs,
+        buttons: {
+          runDisabled: runLiveButton.disabled,
+          stepDisabled: stepLiveButton.disabled,
+          snapshotDisabled: snapshotLiveButton.disabled,
+        },
+      });
+
+      function copyBytes(bytes) {
+        return bytes ? new Uint8Array(bytes) : null;
+      }
+
+      function wait(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+      }
+
+      function ensureLiveWorker() {
+        if (liveWorker) return liveWorker;
+        liveWorker = new Worker(`./emulator-worker.js?v=${encodeURIComponent(buildStamp)}`, { type: "module" });
+        liveWorker.addEventListener("message", (event) => {
+          const { id, ok, result, error } = event.data || {};
+          const request = workerRequests.get(id);
+          if (!request) return;
+          workerRequests.delete(id);
+          if (ok) {
+            request.resolve(result || {});
+          } else {
+            request.reject(new Error(error || "Emulator worker failed"));
+          }
+        });
+        liveWorker.addEventListener("error", (event) => {
+          const error = new Error(event.message || "Emulator worker crashed");
+          for (const request of workerRequests.values()) {
+            request.reject(error);
+          }
+          workerRequests.clear();
+          liveWorker = null;
+          emulator = null;
+          stopLive();
+          refreshButtons();
+        });
+        return liveWorker;
+      }
+
+      function callEmulatorWorker(type, payload = {}, transfer = []) {
+        const worker = ensureLiveWorker();
+        const id = ++workerRequestId;
+        return new Promise((resolve, reject) => {
+          const timeout = window.setTimeout(() => {
+            workerRequests.delete(id);
+            const error = new Error(`Emulator worker timed out while handling ${type}`);
+            if (liveWorker) {
+              liveWorker.terminate();
+              liveWorker = null;
+            }
+            emulator = null;
+            stopLive();
+            refreshButtons();
+            reject(error);
+          }, workerRequestTimeoutMs);
+          workerRequests.set(id, {
+            resolve: (value) => {
+              window.clearTimeout(timeout);
+              resolve(value);
+            },
+            reject: (error) => {
+              window.clearTimeout(timeout);
+              reject(error);
+            },
+          });
+          worker.postMessage({ id, type, ...payload }, transfer);
+        });
+      }
+
+      function destroyLiveWorker() {
+        joypadInputQueue = Promise.resolve();
+        if (liveWorker) {
+          liveWorker.terminate();
+          liveWorker = null;
+        }
+        for (const request of workerRequests.values()) {
+          request.reject(new Error("Emulator worker was reset"));
+        }
+        workerRequests.clear();
+      }
+
+      async function createLiveEmulator(bytes) {
+        destroyLiveWorker();
+        emulator = null;
+        const firmwareBytes = copyBytes(bytes);
+        const sdBytes = copyBytes(sdImageBytes);
+        const transfer = [firmwareBytes.buffer];
+        if (sdBytes) transfer.push(sdBytes.buffer);
+        const result = await callEmulatorWorker(
+          "create",
+          { firmwareBytes, sdImageBytes: sdBytes },
+          transfer,
+        );
+        emulator = { worker: true };
+        return result;
+      }
+
+      async function runWithFirmware(action) {
+        if (busy) return;
+
+        busy = true;
+        refreshButtons();
+        clearOutput();
+        report.textContent = "Reading firmware...";
+        let completedStatus = null;
+
+        try {
+          const bytes = await readFirmwareBytes();
+          if (!bytes) {
+            status.textContent = "Choose a Teensy .hex firmware file.";
+            report.textContent = "";
+            return;
+          }
+          completedStatus = await action(bytes);
+        } catch (error) {
+          report.textContent = String(error);
+          status.textContent = "Could not process firmware.";
+        } finally {
+          busy = false;
+          refreshButtons();
+          if (completedStatus) {
+            status.textContent = completedStatus;
+            publishSmokeState();
+          }
+        }
+      }
+
+      async function readFirmwareBytes() {
+        const file = selectedFile();
+        if (file) return new Uint8Array(await file.arrayBuffer());
+        if (queryFirmwareBytes) return copyBytes(queryFirmwareBytes);
+
+        const firmwareUrl = queryFirmwareUrl();
+        if (!firmwareUrl) return null;
+        const response = await fetch(firmwareUrl);
+        if (!response.ok) {
+          throw new Error(`Could not load firmware: ${response.status}`);
+        }
+        queryFirmwareBytes = new Uint8Array(await response.arrayBuffer());
+        return copyBytes(queryFirmwareBytes);
+      }
+
+      async function startLiveSession() {
+        await runWithFirmware(async (bytes) => {
+          stopLive();
+          joypadState = 0;
+          joypadInputQueue = Promise.resolve();
+          setupControlButtons();
+          renderLiveShell();
+          const result = await createLiveEmulator(bytes);
+          processDisplaySlip(result.displaySlip);
+          processAudioPcmWords(result.audioPcmWords);
+          renderLiveSummary(result.summary);
+          await warmUpLiveSession(liveStartWarmupMaxSteps);
+          return "Live emulator session ready.";
+        });
+        refreshButtons();
+      }
+
+      function startLiveLoop() {
+        if (!emulator || liveRunning) return;
+        liveRunning = true;
+        refreshButtons();
+        const loop = async () => {
+          if (!liveRunning || !emulator) return;
+          try {
+            const startedAt = performance.now();
+            const summary = await runLiveTick(liveStepBudget);
+            if (!liveRunning || !emulator) return;
+            lastLiveTickMs = performance.now() - startedAt;
+            tuneLiveStepBudget(lastLiveTickMs);
+            if (summary?.stopped) {
+              stopLive();
+              status.textContent = `Live emulator stopped: ${bootProbeStatusLabel(summary.status)} at ${hex(summary.pc)}.`;
+              return;
+            }
+          } catch (error) {
+            console.error(error);
+            stopLive();
+            status.textContent = "Live emulator paused after an internal error.";
+            report.textContent = String(error);
+            return;
+          }
+          liveTimer = window.requestAnimationFrame(loop);
+        };
+        liveTimer = window.requestAnimationFrame(loop);
+      }
+
+      function stopLive() {
+        liveRunning = false;
+        if (liveTimer) {
+          window.cancelAnimationFrame(liveTimer);
+          liveTimer = 0;
+        }
+        if (lastLiveSummary) {
+          renderLiveSummary(lastLiveSummary);
+        }
+        refreshButtons();
+      }
+
+      async function runLiveTick(stepBudget) {
+        if (!emulator) return null;
+        const result = await callEmulatorWorker("run", { steps: stepBudget, live: true });
+        const summary = result.summary;
+        processDisplaySlip(result.displaySlip);
+        processAudioPcmWords(result.audioPcmWords);
+        const now = performance.now();
+        const shouldRenderSummary = !liveRunning
+          || summary?.stopped
+          || !lastLiveSummary
+          || now - lastLiveSummaryRenderAt >= 125;
+        if (shouldRenderSummary) {
+          renderLiveSummary(summary);
+          lastLiveSummaryRenderAt = now;
+        } else {
+          lastLiveSummary = summary;
+        }
+        return summary;
+      }
+
+      function tuneLiveStepBudget(elapsedMs) {
+        if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return;
+        if (elapsedMs > liveTickTargetMs * 1.8 && liveStepBudget > minLiveStepsPerFrame) {
+          liveStepBudget = Math.max(minLiveStepsPerFrame, Math.floor(liveStepBudget * 0.65));
+        } else if (elapsedMs < liveTickTargetMs * 0.55 && liveStepBudget < maxLiveStepsPerFrame) {
+          liveStepBudget = Math.min(maxLiveStepsPerFrame, Math.ceil(liveStepBudget * 1.25));
+        }
+      }
+
+      async function runLiveTicksYielding(totalSteps, chunkSteps = liveStepBudget) {
+        let remaining = Math.max(1, Math.min(500000000, Number(totalSteps || 1)));
+        let summaryResult = null;
+        while (remaining > 0 && emulator) {
+          const steps = Math.min(chunkSteps, remaining);
+          summaryResult = await runLiveTick(steps);
+          remaining -= steps;
+          if (summaryResult?.stopped) break;
+          if (remaining > 0) {
+            await nextFrame();
+          }
+        }
+        return summaryResult;
+      }
+
+      async function warmUpLiveSession(maxSteps = liveStartWarmupMaxSteps) {
+        let remaining = Math.max(0, Math.min(500000000, Number(maxSteps || 0)));
+        let summaryResult = lastLiveSummary;
+        while (remaining > 0 && emulator && !liveSessionReady(summaryResult)) {
+          const steps = Math.min(liveStartWarmupChunkSteps, remaining);
+          status.textContent = `Preparing live emulator (${formatCount(maxSteps - remaining)}/${formatCount(maxSteps)} steps)...`;
+          await nextFrame();
+          const startedAt = performance.now();
+          summaryResult = await runLiveTick(steps);
+          lastLiveTickMs = performance.now() - startedAt;
+          remaining -= steps;
+          if (summaryResult?.stopped) break;
+          await nextFrame();
+        }
+        if (lastLiveSummary) {
+          renderLiveSummary(lastLiveSummary);
+        }
+        return summaryResult;
+      }
+
+      function liveSessionReady(summary = lastLiveSummary) {
+        if (!summary || summary.stopped) return false;
+        return Boolean(summary.host_input?.firmware_input_ready)
+          && displayStatsReady(summary.display)
+          && !lastDisplayError;
+      }
+
+      function displayStatsReady(stats) {
+        return stats?.source === "render-cache"
+          && stats?.format === "m8-render-cache"
+          && Number(stats?.non_blank_cells || 0) >= 64;
+      }
+
+      function renderLiveSummary(liveSummary) {
+        lastLiveSummary = liveSummary;
+        const metrics = [
+          ["Mode", liveRunning ? "live running" : "live paused"],
+          ["CPU PC", hex(liveSummary.pc)],
+          ["SP", hex(liveSummary.sp)],
+          ["LR", hex(liveSummary.lr)],
+          ["Executed", formatCount(liveSummary.executed_steps)],
+          ["Live chunk", `${formatCount(liveStepBudget)} steps${lastLiveTickMs ? `, ${lastLiveTickMs.toFixed(0)} ms` : ""}`],
+          ["Cycles", formatCount(liveSummary.cycles)],
+          ["Trace total", formatCount(liveSummary.trace_total)],
+          ["Trace retained", formatCount(liveSummary.trace_retained)],
+          ["Last trace", formatLastTrace(liveSummary)],
+          ["Last opcode", formatTraceOpcode(liveSummary.last_trace_opcode16, liveSummary.last_trace_opcode32)],
+          ["Stop event", formatStopEvent(liveSummary)],
+          ["Joypad", `0b${Number(liveSummary.joypad_state || 0).toString(2).padStart(8, "0")}`],
+          ["Host input", liveSummary.host_input?.last_packet_label || "none"],
+          ["Input queue", `${formatCount(liveSummary.host_input?.queued_bytes)} bytes`],
+          ["CDC RX", `${formatCount(liveSummary.host_input?.cdc_rx_available_bytes)} bytes, ${formatCount(liveSummary.host_input?.cdc_rx_injected_bytes)} injected`],
+          ["Firmware input", `${formatCount(liveSummary.host_input?.firmware_input_calls)} calls, ${formatCount(liveSummary.host_input?.firmware_input_delivered_bytes)} bytes`],
+          ["Last input hook", liveSummary.host_input?.last_firmware_input_endpoint || "none"],
+          ["Input callsite", formatMaybeHex(liveSummary.host_input?.last_firmware_input_callsite)],
+          ["Input base", formatMaybeHex(liveSummary.host_input?.active_m8_input_base)],
+          ["Input memory", formatInputMemory(liveSummary.host_input)],
+          ["Remote buttons", formatRemoteButtons(liveSummary.host_input)],
+          ["Remote serial", formatObservedRemoteSerial(liveSummary.host_input)],
+          ["Remote serial IO", formatRemotePump(liveSummary.host_input)],
+          ["Observed handler", formatObservedInput(liveSummary.host_input)],
+          ["Observed parser", formatObservedParser(liveSummary.host_input)],
+          ["Display source", formatDisplayStats(liveSummary.display)],
+          ["SD blocks read", formatCount(liveSummary.sd_card?.read_blocks)],
+          ["SD commands", formatUsdhcCommands(liveSummary.usdhc_commands)],
+          ["uSDHC hot read", formatAddressHotspot(liveSummary.usdhc_reads?.[0])],
+          ["uSDHC hot write", formatAddressHotspot(liveSummary.usdhc_writes?.[0])],
+          ["Audio MMIO", formatAudioStats(liveSummary.audio)],
+          ["Audio PCM", formatAudioPcm(liveSummary.audio)],
+          ["Audio source", formatAudioSource(liveSummary.audio)],
+          ["Audio hot read", formatAddressHotspot(liveSummary.audio?.top_reads?.[0])],
+          ["Audio hot write", formatAddressHotspot(liveSummary.audio?.top_writes?.[0])],
+          ["Status", bootProbeStatusLabel(liveSummary.status)],
+        ];
+        summary.replaceChildren(...metrics.map(([name, value]) => metric(name, value)));
+        renderDeviceStatus(liveSummary.sd_card, liveSummary.host_input, liveSummary.audio);
+        status.textContent = liveSummary.stopped
+          ? `Live emulator stopped: ${bootProbeStatusLabel(liveSummary.status)} at ${hex(liveSummary.pc)}.`
+          : `Live emulator ${liveRunning ? "running" : "paused"} at ${hex(liveSummary.pc)}.`;
+        publishSmokeState();
+      }
+
+      function renderLiveShell() {
+        m8WebRenderer = null;
+        m8WebParser = null;
+        displaySlipBytesProcessed = 0;
+        displaySlipPacketsProcessed = 0;
+        lastDisplayError = null;
+        const section = document.createElement("section");
+        section.className = "live-display";
+        const heading = document.createElement("h2");
+        heading.textContent = "M8WebDisplay live display";
+        const stage = document.createElement("div");
+        stage.className = "m8web-stage";
+        const canvas = document.createElement("canvas");
+        canvas.id = "canvas";
+        canvas.width = 320;
+        canvas.height = 240;
+        stage.append(canvas);
+        section.append(heading, stage);
+        display.replaceChildren(section);
+        m8WebRenderer = new M8WebDisplayRenderer([0, 0, 0], (r, g, b) => {
+          stage.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+        });
+        m8WebParser = new M8WebDisplayParser(m8WebRenderer);
+        m8WebRenderer.clear();
+        segments.replaceChildren();
+        report.textContent = "";
+        window.__m8convertM8WebDisplay = {
+          renderer: m8WebRenderer,
+          parser: m8WebParser,
+          stage,
+        };
+        publishSmokeState();
+      }
+
+      function processDisplaySlip(bytes) {
+        if (!m8WebParser || !bytes?.length) return false;
+        try {
+          m8WebParser.process(bytes);
+          displaySlipBytesProcessed += bytes.length;
+          displaySlipPacketsProcessed += 1;
+          lastDisplayError = null;
+          return true;
+        } catch (error) {
+          lastDisplayError = String(error);
+          console.error(error);
+          status.textContent = "Could not process M8WebDisplay frame.";
+          publishSmokeState();
+          return false;
+        }
+      }
+
+      function processAudioPcmWords(words) {
+        if (!words?.length) return;
+        audioQueuedWords += words.length;
+        if (!audioEnabled || !audioContext) return;
+
+        const frameCount = words.length;
+        const buffer = audioContext.createBuffer(2, frameCount, audioContext.sampleRate);
+        const left = buffer.getChannelData(0);
+        const right = buffer.getChannelData(1);
+        for (let i = 0; i < frameCount; i += 1) {
+          const word = Number(words[i] >>> 0);
+          left[i] = signed16(word & 0xffff) / 32768;
+          right[i] = signed16((word >>> 16) & 0xffff) / 32768;
+        }
+
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+        const now = audioContext.currentTime;
+        if (audioScheduledAt < now + 0.02) {
+          audioScheduledAt = now + 0.02;
+        }
+        source.start(audioScheduledAt);
+        audioScheduledAt += frameCount / audioContext.sampleRate;
+        if (audioScheduledAt - now > 0.5) {
+          audioScheduledAt = now + 0.5;
+        }
+      }
+
+      function signed16(value) {
+        return value & 0x8000 ? value - 0x10000 : value;
+      }
+
+      function audioContextConstructor() {
+        return window.AudioContext || window.webkitAudioContext || null;
+      }
+
+      function setupControlButtons() {
+        controls.replaceChildren();
+        for (const group of controlGroups) {
+          for (const action of group) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.dataset.action = action;
+            button.textContent = action;
+            button.style.touchAction = "none";
+            button.addEventListener("pointerdown", (event) => {
+              button.setPointerCapture?.(event.pointerId);
+              handleControlInput(event, action, true);
+            });
+            button.addEventListener("pointerup", (event) => handleControlInput(event, action, false));
+            button.addEventListener("pointerleave", (event) => handleControlInput(event, action, false));
+            button.addEventListener("pointercancel", (event) => handleControlInput(event, action, false));
+            button.addEventListener("lostpointercapture", (event) => handleControlInput(event, action, false));
+            controls.append(button);
+          }
+        }
+        renderControlState();
+      }
+
+      window.addEventListener("blur", () => releaseAllControls());
+
+      function handleKeyboardInput(event, isDown) {
+        const action = keyboardMap[event.code] || keyboardKeyMap[event.key];
+        if (!action || event.repeat) return;
+        if (isDown) {
+          keyboardHeldActions.add(action);
+        } else {
+          keyboardHeldActions.delete(action);
+        }
+        const usesImplicitSelect = action !== "select"
+          && directionalActions.has(action)
+          && event.shiftKey;
+        if (usesImplicitSelect && isDown) {
+          keyboardImplicitSelectActions.add(action);
+          handleAction("select", true, event);
+        }
+        handleAction(action, isDown, event);
+        if (!isDown && keyboardImplicitSelectActions.delete(action) && !keyboardHeldActions.has("select")) {
+          handleAction("select", false, event);
+        }
+      }
+
+      function handleControlInput(event, action, isDown) {
+        const actions = action.split("+");
+        if (actions.length > 1) {
+          handleChordAction(action, actions, isDown, event);
+          return;
+        }
+        handleAction(action, isDown, event);
+      }
+
+      function handleChordAction(action, actions, isDown, event) {
+        event?.preventDefault?.();
+        const chordMask = actions.reduce((value, item) => value | (1 << keyBitMap[item]), 0);
+        if (chordMask === 0 || actions.some((item) => keyBitMap[item] === undefined)) return;
+
+        if (isDown) {
+          clearControlRelease(action);
+          for (const item of actions) clearControlRelease(item);
+          controlPressStartedAt.set(action, performance.now());
+          applyActionMask(chordMask, true);
+        } else {
+          const startedAt = controlPressStartedAt.get(action);
+          const elapsed = startedAt === undefined ? minControlPressMs : performance.now() - startedAt;
+          const delay = Math.max(0, minControlPressMs - elapsed);
+          if (delay > 0) {
+            const pendingRelease = controlReleaseTimers.get(action);
+            if (pendingRelease) window.clearTimeout(pendingRelease);
+            const timer = window.setTimeout(() => {
+              controlReleaseTimers.delete(action);
+              releaseChordAction(action, chordMask);
+            }, delay);
+            controlReleaseTimers.set(action, timer);
+            return;
+          }
+          releaseChordAction(action, chordMask);
+        }
+      }
+
+      function releaseChordAction(action, chordMask) {
+        controlPressStartedAt.delete(action);
+        applyActionMask(chordMask, false);
+      }
+
+      function handleAction(action, isDown, event) {
+        const bit = keyBitMap[action];
+        if (bit === undefined) return;
+        event?.preventDefault();
+        if (isDown) {
+          clearControlRelease(action);
+          clearChordReleasesContainingAction(action);
+          controlPressStartedAt.set(action, performance.now());
+        } else {
+          const startedAt = controlPressStartedAt.get(action);
+          const elapsed = startedAt === undefined ? minControlPressMs : performance.now() - startedAt;
+          const delay = Math.max(0, minControlPressMs - elapsed);
+          if (delay > 0) {
+            const pendingRelease = controlReleaseTimers.get(action);
+            if (pendingRelease) window.clearTimeout(pendingRelease);
+            const timer = window.setTimeout(() => {
+              controlReleaseTimers.delete(action);
+              controlPressStartedAt.delete(action);
+              applyActionState(false, bit);
+            }, delay);
+            controlReleaseTimers.set(action, timer);
+            return;
+          }
+          controlPressStartedAt.delete(action);
+        }
+        applyActionState(isDown, bit);
+      }
+
+      function clearControlRelease(action) {
+        const pendingRelease = controlReleaseTimers.get(action);
+        if (!pendingRelease) return;
+        window.clearTimeout(pendingRelease);
+        controlReleaseTimers.delete(action);
+      }
+
+      function clearChordReleasesContainingAction(action) {
+        for (const group of controlGroups) {
+          for (const candidate of group) {
+            if (!candidate.includes("+")) continue;
+            if (candidate.split("+").includes(action)) {
+              clearControlRelease(candidate);
+            }
+          }
+        }
+      }
+
+      function releaseAllControls() {
+        for (const timer of controlReleaseTimers.values()) {
+          window.clearTimeout(timer);
+        }
+        controlReleaseTimers.clear();
+        controlPressStartedAt.clear();
+        keyboardHeldActions.clear();
+        keyboardImplicitSelectActions.clear();
+        if (joypadState === 0) return;
+        joypadState = 0;
+        if (emulator) {
+          queueJoypadState(joypadState);
+          updateLastSummaryInputState();
+        }
+        renderControlState();
+      }
+
+      function applyActionState(isDown, bit) {
+        applyActionMask(1 << bit, isDown);
+      }
+
+      function applyActionMask(mask, isDown, event) {
+        event?.preventDefault?.();
+        const next = isDown ? joypadState | mask : joypadState & ~mask;
+        if (next === joypadState) return;
+        joypadState = next;
+        if (emulator) {
+          queueJoypadState(joypadState);
+          updateLastSummaryInputState();
+        }
+        renderControlState();
+      }
+
+      function queueJoypadState(state) {
+        const payloadState = Number(state) & 0xff;
+        lastJoypadQueuedAt = performance.now();
+        joypadInputQueue = joypadInputQueue
+          .catch(() => {})
+          .then(() => {
+            if (!emulator) return null;
+            return callEmulatorWorker("sendJoypadState", {
+              state: payloadState,
+              steps: Math.max(inputSettleSteps, liveStepBudget),
+            });
+          })
+          .then((result) => {
+            if (!result) return null;
+            lastJoypadWorkerResult = result;
+            if (result.inputApplied) {
+              lastJoypadAppliedAt = performance.now();
+            }
+            processDisplaySlip(result.displaySlip);
+            processAudioPcmWords(result.audioPcmWords);
+            if (result.summary) {
+              renderLiveSummary(result.summary);
+            } else {
+              updateLastSummaryInputState(result.hostInput, result.sdCard, result.audio, result.display);
+            }
+            return result;
+          })
+          .catch((error) => {
+            console.error(error);
+            status.textContent = "Could not send joypad state to the live emulator.";
+            return null;
+          });
+        return joypadInputQueue;
+      }
+
+      function queueHostBytes(bytes) {
+        callEmulatorWorker("sendHostBytes", { bytes })
+          .then((result) => {
+            processDisplaySlip(result.displaySlip);
+            processAudioPcmWords(result.audioPcmWords);
+            updateLastSummaryInputState(result.hostInput, result.sdCard, result.audio, result.display);
+          })
+          .catch((error) => {
+            console.error(error);
+            status.textContent = "Could not send input to the live emulator.";
+          });
+      }
+
+      function updateLastSummaryInputState(hostInput = null, sdCard = null, audio = null, displayStats = null) {
+        if (!lastLiveSummary || !emulator) return;
+        lastLiveSummary = {
+          ...lastLiveSummary,
+          joypad_state: joypadState,
+          host_input: hostInput || lastLiveSummary.host_input,
+          sd_card: sdCard || lastLiveSummary.sd_card,
+          audio: audio || lastLiveSummary.audio,
+          display: displayStats || lastLiveSummary.display,
+        };
+        renderLiveSummary(lastLiveSummary);
+      }
+
+      function renderDeviceStatus(sdCard = null, hostInput = null, audio = null) {
+        const inputHookLabel = hostInput?.firmware_input_ready
+          ? `${hostInput.firmware_input_endpoint} shim active${hostInput.last_firmware_input_endpoint ? ` (${hostInput.last_firmware_input_endpoint})` : ""}`
+          : "USB CDC endpoint shim pending";
+        const displayStats = lastLiveSummary?.display || null;
+        const displayHasContent = Number(displayStats?.non_blank_cells || 0) > 0;
+        const displayActive = emulator && displayHasContent && !lastDisplayError;
+        const displayLabel = !emulator
+          ? "waiting for firmware"
+          : lastDisplayError
+            ? `M8WebDisplay error: ${lastDisplayError}`
+            : displayHasContent
+              ? `${formatDisplayStats(displayStats)} (${formatBytes(displaySlipBytesProcessed)}, ${formatCount(displaySlipPacketsProcessed)} packets)`
+              : `display shell ready (${formatBytes(displaySlipBytesProcessed)}, waiting for firmware frames)`;
+        const audioLabel = audio?.observed
+          ? `${formatCount(audio.total_reads)} reads, ${formatCount(audio.total_writes)} writes, ${formatCount(audio.captured_pcm_words)} pcm; ${formatAudioHotspots(audio)}`
+          : (audio?.status || "waiting for SAI/DMA/DMAMUX/USB-audio MMIO");
+        const items = [
+          ["CPU/display", displayLabel, Boolean(displayActive)],
+          ["Host input", hostInput?.last_packet_label || "M8WebDisplay bytes accepted", Boolean(emulator)],
+          ["Firmware input", inputHookLabel, Boolean(hostInput?.firmware_input_ready)],
+          ["SD card", sdCard?.present ? `${formatBytes(sdCard.bytes)} image, ${formatCount(sdCard.read_blocks)} reads` : "no image loaded", Boolean(sdCard?.present)],
+          ["Audio", audioLabel, Boolean(audio?.observed)],
+        ];
+        deviceStatus.replaceChildren(...items.map(([name, value, ready]) => {
+          const item = document.createElement("div");
+          item.className = `device-item ${ready ? "ready" : "pending"}`;
+          const nameNode = document.createElement("span");
+          nameNode.textContent = name;
+          const valueNode = document.createElement("strong");
+          valueNode.textContent = value;
+          item.append(nameNode, valueNode);
+          return item;
+        }));
+      }
+
+      function renderControlState() {
+        for (const button of controls.querySelectorAll("button[data-action]")) {
+          const bits = button.dataset.action
+            .split("+")
+            .map((action) => keyBitMap[action])
+            .filter((bit) => bit !== undefined);
+          button.classList.toggle(
+            "active",
+            bits.length > 0 && bits.every((bit) => (joypadState & (1 << bit)) !== 0),
+          );
+        }
+      }
+
+      function renderAnalysis(analysis, bootProbe = null) {
+        const vector = analysis.vector_table;
+        const bootImage = analysis.boot_image;
+        const metrics = [
+          ["Bytes", String(analysis.byte_count)],
+          ["Raw span", `${hex(analysis.min_raw_address)} - ${hex(analysis.max_raw_address)}`],
+          ["Runtime base", analysis.runtime_base_applied === null ? "as encoded" : hex(analysis.runtime_base_applied)],
+          ["Vector table", vector ? hex(vector.address) : "not found"],
+          ["Initial SP", vector ? `${hex(vector.initial_sp)} ${label(vector.initial_sp_region)}` : "n/a"],
+          ["Reset PC", vector ? `${hex(vector.reset_pc)} ${label(vector.reset_pc_region)}` : "n/a"],
+          ["Boot image", bootImage ? `IVT ${hex(bootImage.ivt_address)}` : "not found"],
+          ["Boot entry", bootImage ? `${hex(bootImage.entry)} ${label(bootImage.entry_region)}` : "n/a"],
+        ];
+
+        if (bootProbe) {
+          metrics.push(["CPU PC", hex(bootProbe.cpu.registers[15])]);
+          metrics.push(["Status", bootProbeStatusLabel(bootProbe.status)]);
+          metrics.push(["Callback stubs", formatCount(bootProbe.stats?.external_callback_stubs)]);
+          metrics.push(["Exception entries", formatCount(bootProbe.stats?.exception_entries)]);
+          metrics.push(["Exception returns", formatCount(bootProbe.stats?.exception_returns)]);
+          metrics.push(["Top exception", formatExceptionHotspot(bootProbe.stats?.exception_vectors?.[0])]);
+          metrics.push(["Top callback", formatCallbackHotspot(bootProbe.stats?.callback_targets?.[0])]);
+          metrics.push(["Pointer guards", formatCount(bootProbe.stats?.pointer_sanitizations?.[0]?.count)]);
+          metrics.push(["First pointer guard", formatPointerGuard(bootProbe.stats?.pointer_sanitization_samples?.[0])]);
+          metrics.push(["Display preview", bootProbe.display?.preferred || "not found"]);
+          metrics.push(["Unmapped reads", formatCount(bootProbe.stats?.unmapped_reads?.[0]?.count)]);
+          metrics.push(["First unmapped", formatUnmappedRead(bootProbe.stats?.unmapped_read_samples?.[0])]);
+          metrics.push(["Hot PC", formatAddressHotspot(bootProbe.stats?.hot_pcs?.[0])]);
+          metrics.push(["Hot edge", formatEdgeHotspot(bootProbe.stats?.hot_edges?.[0])]);
+          metrics.push(["Hot MMIO read", formatAddressHotspot(bootProbe.stats?.mmio_reads?.[0])]);
+          metrics.push(["Hot MMIO write", formatAddressHotspot(bootProbe.stats?.mmio_writes?.[0])]);
+          metrics.push(["uSDHC hot read", formatAddressHotspot(bootProbe.stats?.usdhc_reads?.[0])]);
+          metrics.push(["uSDHC hot write", formatAddressHotspot(bootProbe.stats?.usdhc_writes?.[0])]);
+          metrics.push(["Audio MMIO", formatAudioStats(bootProbe.stats?.audio)]);
+          metrics.push(["Audio PCM", formatAudioPcm(bootProbe.stats?.audio)]);
+          metrics.push(["Audio source", formatAudioSource(bootProbe.stats?.audio)]);
+          metrics.push(["Audio hot read", formatAddressHotspot(bootProbe.stats?.audio?.top_reads?.[0])]);
+          metrics.push(["Audio hot write", formatAddressHotspot(bootProbe.stats?.audio?.top_writes?.[0])]);
+          metrics.push(["Trace total", formatCount(bootProbe.trace_total)]);
+          metrics.push(["Trace shown", formatCount(bootProbe.trace.length)]);
+          metrics.push(["Trace truncated", bootProbe.trace_truncated ? "yes" : "no"]);
+        }
+
+        summary.replaceChildren(...metrics.map(([name, value]) => metric(name, value)));
+        renderDeviceStatus(bootProbe?.stats?.sd_card || null, null, bootProbe?.stats?.audio || null);
+        renderDisplaySnapshot(bootProbe?.display || null);
+        renderSegments(analysis.runtime_segments || []);
+      }
+
+      async function maybeLoadProbeJsonFromQuery() {
+        const probeJson = new URLSearchParams(location.search).get("probeJson");
+        if (!probeJson) return;
+
+        const response = await fetch(probeJson);
+        if (!response.ok) {
+          throw new Error(`Could not load probe JSON: ${response.status}`);
+        }
+        const bootProbe = await response.json();
+        queryProbeLoaded = true;
+        renderAnalysis(bootProbe.analysis, bootProbe);
+        report.textContent = JSON.stringify(bootProbe, null, 2);
+        status.textContent = bootProbeStatusText(bootProbe);
+      }
+
+      async function maybeLoadFirmwareFromQuery() {
+        const params = new URLSearchParams(location.search);
+        const firmwareUrl = params.get("firmwareUrl");
+        if (!firmwareUrl || queryFirmwareLoaded) return;
+
+        busy = true;
+        refreshButtons();
+        try {
+          await maybeLoadSdImageFromQuery(params);
+          const response = await fetch(firmwareUrl);
+          if (!response.ok) {
+            throw new Error(`Could not load firmware: ${response.status}`);
+          }
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          queryFirmwareBytes = copyBytes(bytes);
+          joypadState = 0;
+          setupControlButtons();
+          renderLiveShell();
+          const initial = await createLiveEmulator(bytes);
+          queryFirmwareLoaded = true;
+          processDisplaySlip(initial.displaySlip);
+          processAudioPcmWords(initial.audioPcmWords);
+          renderLiveSummary(initial.summary);
+
+          const autorunParam = params.get("autorunSteps");
+          const summary = autorunParam === null
+            ? await warmUpLiveSession(liveStartWarmupMaxSteps)
+            : await runLiveTicksYielding(Number(autorunParam || 1), autorunStepsPerFrame);
+          queryProbeLoaded = true;
+          if (params.get("run") === "1" && summary && !summary.stopped) {
+            startLiveLoop();
+          }
+        } finally {
+          busy = false;
+          refreshButtons();
+        }
+      }
+
+      async function maybeLoadSdImageFromQuery(params) {
+        const sdUrl = params.get("sdUrl");
+        if (!sdUrl) return;
+        const response = await fetch(sdUrl);
+        if (!response.ok) {
+          throw new Error(`Could not load SD image: ${response.status}`);
+        }
+        sdImageBytes = new Uint8Array(await response.arrayBuffer());
+        sdImageName = sdUrl.split("/").pop() || "query SD image";
+      }
+
+      function renderDisplaySnapshot(snapshot) {
+        if (!snapshot || !Array.isArray(snapshot.candidates) || snapshot.candidates.length === 0) {
+          display.replaceChildren();
+          return;
+        }
+
+        const section = document.createElement("section");
+        section.className = "display-snapshot";
+        const heading = document.createElement("h2");
+        heading.textContent = "Display snapshot";
+        const grid = document.createElement("div");
+        grid.className = "display-candidates";
+
+        for (const candidate of snapshot.candidates.slice(0, 6)) {
+          const details = document.createElement("details");
+          details.className = "display-candidate";
+          details.open = candidate.name === snapshot.preferred;
+
+          const summaryNode = document.createElement("summary");
+          summaryNode.textContent = candidate.name;
+
+          const meta = document.createElement("p");
+          meta.className = "display-meta";
+          meta.textContent = `${candidate.format} ${hex(candidate.base)}-${hex(candidate.end_exclusive)} score ${formatCount(candidate.score)}`;
+
+          const body = candidate.format === "m8-render-cache"
+            ? renderM8Screen(candidate)
+            : renderDisplayPre(candidate);
+
+          details.append(summaryNode, meta, body);
+          for (const note of candidate.notes || []) {
+            const noteNode = document.createElement("p");
+            noteNode.className = "display-note";
+            noteNode.textContent = note;
+            details.append(noteNode);
+          }
+          grid.append(details);
+        }
+
+        section.append(heading, grid);
+        display.replaceChildren(section);
+      }
+
+      function renderDisplayPre(candidate) {
+        const pre = document.createElement("pre");
+        pre.className = "display-pre";
+        pre.textContent = (candidate.rows || []).join("\n");
+        return pre;
+      }
+
+      function renderM8Screen(candidate) {
+        const screen = document.createElement("div");
+        screen.className = "m8-screen";
+        const rows = candidate.rows || [];
+        const styles = candidate.styles || [];
+        const height = candidate.height || rows.length;
+        const width = candidate.width || 40;
+
+        for (let y = 0; y < height; y += 1) {
+          const row = (rows[y] || "").padEnd(width, " ");
+          const styleRow = styles[y] || [];
+          for (let x = 0; x < width; x += 1) {
+            const cellNode = document.createElement("span");
+            cellNode.className = "m8-cell";
+            cellNode.textContent = row[x] || " ";
+            cellNode.style.color = styleToColor(styleRow[x] || 0);
+            screen.append(cellNode);
+          }
+        }
+
+        return screen;
+      }
+
+      function styleToColor(style) {
+        const value = Number(style || 0) & 0xffff;
+        if (value === 0) return "#000000";
+        const r = ((value >> 11) & 0x1f) * 255 / 31;
+        const g = ((value >> 5) & 0x3f) * 255 / 63;
+        const b = (value & 0x1f) * 255 / 31;
+        const boost = 3.25;
+        return `rgb(${Math.min(255, Math.round(r * boost))}, ${Math.min(255, Math.round(g * boost))}, ${Math.min(255, Math.round(b * boost))})`;
+      }
+
+      function renderSegments(items) {
+        if (items.length === 0) {
+          segments.replaceChildren();
+          return;
+        }
+
+        const table = document.createElement("table");
+        const thead = document.createElement("thead");
+        thead.innerHTML = "<tr><th>Start</th><th>End</th><th>Size</th><th>Region</th></tr>";
+        const tbody = document.createElement("tbody");
+
+        for (const segment of items) {
+          const row = document.createElement("tr");
+          row.append(
+            cell(hex(segment.start)),
+            cell(hex(segment.end_exclusive)),
+            cell(String(segment.size)),
+            cell(segment.region || "unknown"),
+          );
+          tbody.append(row);
+        }
+
+        table.append(thead, tbody);
+        segments.replaceChildren(table);
+      }
+
+      function metric(name, value) {
+        const item = document.createElement("div");
+        item.className = "metric";
+        const labelNode = document.createElement("span");
+        labelNode.textContent = name;
+        const valueNode = document.createElement("strong");
+        valueNode.textContent = value;
+        item.append(labelNode, valueNode);
+        return item;
+      }
+
+      function cell(value) {
+        const td = document.createElement("td");
+        td.textContent = value;
+        return td;
+      }
+
+      function clearOutput() {
+        summary.replaceChildren();
+        display.replaceChildren();
+        segments.replaceChildren();
+        report.textContent = "";
+        m8WebRenderer = null;
+        m8WebParser = null;
+        lastLiveSummary = null;
+        lastLiveSummaryRenderAt = 0;
+        displaySlipBytesProcessed = 0;
+        displaySlipPacketsProcessed = 0;
+        lastDisplayError = null;
+        lastJoypadWorkerResult = null;
+        lastJoypadQueuedAt = 0;
+        lastJoypadAppliedAt = 0;
+        audioQueuedWords = 0;
+        audioScheduledAt = audioContext?.currentTime || 0;
+        renderDeviceStatus(null);
+        publishSmokeState();
+      }
+
+      function nextFrame() {
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          requestAnimationFrame(finish);
+          window.setTimeout(finish, 50);
+        });
+      }
+
+      function bootProbeStatusText(bootProbe) {
+        const label = bootProbeStatusLabel(bootProbe.status);
+        const shown = formatCount(bootProbe.trace.length);
+        const total = formatCount(bootProbe.trace_total);
+        const truncated = bootProbe.trace_truncated ? ", trace truncated" : "";
+        if (bootProbe.status === "boot-probe-max-steps-reached") {
+          return `Boot probe reached the step limit without an emulator stop: ${label}. PC ${hex(bootProbe.cpu.registers[15])}. Trace ${shown}/${total}${truncated}.`;
+        }
+        return `Boot probe stopped: ${label}. PC ${hex(bootProbe.cpu.registers[15])}. Trace ${shown}/${total}${truncated}.`;
+      }
+
+      function bootProbeStatusLabel(value) {
+        switch (value) {
+          case "boot-probe-max-steps-reached":
+            return "firmware still running";
+          case "boot-probe-pc-outside-loaded-memory":
+            return "PC outside loaded firmware memory";
+          case "boot-probe-hit-breakpoint":
+            return "breakpoint reached";
+          case "boot-probe-hit-unmapped-read":
+            return "unmapped data read";
+          case "boot-probe-hit-unsupported-instruction":
+            return "decoded instruction stop";
+          default:
+            return value || "unknown";
+        }
+      }
+
+      function formatCount(value) {
+        return Number(value || 0).toLocaleString();
+      }
+
+      function formatBytes(value) {
+        const bytes = Number(value || 0);
+        if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+        if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+        if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${bytes} B`;
+      }
+
+      function formatDisplayStats(stats) {
+        if (!stats || Number(stats.non_blank_cells || 0) <= 0) return "blank";
+        const source = stats.preferred || stats.source || "display";
+        const format = stats.format || stats.source || "unknown";
+        return `${source} (${format}, ${formatCount(stats.non_blank_cells)} nonblank)`;
+      }
+
+      function formatMaybeHex(value) {
+        return value === undefined || value === null ? "none" : hex(value);
+      }
+
+      function formatObservedInput(hostInput) {
+        const base = hostInput?.observed_m8_controller_base;
+        if (base === undefined || base === null) return "none";
+        const state = Number(hostInput?.observed_m8_controller_state || 0).toString(2).padStart(8, "0");
+        return `${hex(base)} state 0b${state}`;
+      }
+
+      function formatInputMemory(hostInput) {
+        const current = hostInput?.input_memory_current_state;
+        if (current === undefined || current === null) return "none";
+        const previous = Number(hostInput?.input_memory_previous_state || 0).toString(2).padStart(8, "0");
+        const currentBits = Number(current || 0).toString(2).padStart(8, "0");
+        return `cur 0b${currentBits}, prev 0b${previous}, dirty ${Number(hostInput?.input_memory_dirty_flag || 0)}`;
+      }
+
+      function formatRemoteButtons(hostInput) {
+        const current = hostInput?.observed_m8_remote_controller_current;
+        if (current === undefined || current === null) return "none";
+        const previous = Number(hostInput?.observed_m8_remote_controller_previous || 0).toString(2).padStart(8, "0");
+        const currentBits = Number(current || 0).toString(2).padStart(8, "0");
+        const polls = formatCount(hostInput?.remote_controller_poll_attempts);
+        const changes = formatCount(hostInput?.remote_controller_poll_changes);
+        const consumes = formatCount(hostInput?.remote_controller_consume_successes);
+        return `cur 0b${currentBits}, prev 0b${previous}, ${consumes}/${changes}/${polls} consume/change/poll`;
+      }
+
+      function formatObservedParser(hostInput) {
+        const base = hostInput?.observed_m8_event_parser_base;
+        if (base === undefined || base === null) return "none";
+        return `${hex(base)} code ${formatMaybeHex(hostInput?.observed_m8_event_code)} value ${formatMaybeHex(hostInput?.observed_m8_event_value)}`;
+      }
+
+      function formatObservedRemoteSerial(hostInput) {
+        const base = hostInput?.observed_m8_remote_serial_base;
+        if (base === undefined || base === null) return "none";
+        const len = Number(hostInput?.observed_m8_remote_serial_length || 0);
+        const flags = [
+          hostInput?.observed_m8_remote_serial_connected ? "connected" : "disconnected",
+          hostInput?.observed_m8_remote_serial_active ? "active" : "idle",
+          hostInput?.observed_m8_remote_serial_busy ? "busy" : "ready",
+        ].join(", ");
+        return `${hex(base)} len ${len}, ${flags}`;
+      }
+
+      function formatRemotePump(hostInput) {
+        if (!hostInput) return "none";
+        return `${formatCount(hostInput.remote_serial_pump_successes)}/${formatCount(hostInput.remote_serial_pump_attempts)} returned`;
+      }
+
+      function formatUsdhcCommands(commands) {
+        if (!Array.isArray(commands) || commands.length === 0) return "none";
+        const command = commands[0];
+        const suffix = command.data_present ? " data" : "";
+        const commandName = `${command.app_command ? "ACMD" : "CMD"}${command.command_index}`;
+        const transfer = command.data_present
+          ? ` ds ${formatMaybeHex(command.ds_addr)} blk ${formatMaybeHex(command.block_attribute)} mix ${formatMaybeHex(command.mix_ctrl)}`
+          : "";
+        return `${command.instance} ${commandName}${suffix} arg ${formatMaybeHex(command.argument)}${transfer} x${formatCount(command.count)}`;
+      }
+
+      function formatAudioStats(audio) {
+        if (!audio) return "n/a";
+        if (!audio.observed) return audio.status || "not observed";
+        return `${formatCount(audio.total_reads)} reads, ${formatCount(audio.total_writes)} writes`;
+      }
+
+      function formatAudioPcm(audio) {
+        if (!audio) return "n/a";
+        const last = audio.last_pcm_word === undefined || audio.last_pcm_word === null
+          ? "none"
+          : hex(audio.last_pcm_word);
+        const active = `${formatCount(audio.nonzero_pcm_words)} nonzero, peak ${formatCount(audio.peak_abs_sample)}`;
+        const out = audioEnabled ? `, web ${formatCount(audioQueuedWords)}` : "";
+        return `${formatCount(audio.captured_pcm_words)} words, ${active}, ${formatCount(audio.dma_transfers)} dma${out}, last ${last}`;
+      }
+
+      function formatAudioSource(audio) {
+        const channel = audio?.active_dma_channels?.[0];
+        if (!channel) return "n/a";
+        return `${hex(channel.source_ring_base)} +${formatBytes(channel.source_ring_bytes)}, ${formatCount(channel.source_ring_nonzero_words)} nonzero, peak ${formatCount(channel.source_ring_peak_abs_sample)}`;
+      }
+
+      function formatAudioHotspots(audio) {
+        const hot = [
+          audio?.sai_writes?.[0],
+          audio?.dma_writes?.[0],
+          audio?.dmamux_writes?.[0],
+          audio?.clock_writes?.[0],
+          audio?.sai_reads?.[0],
+        ].filter(Boolean);
+        if (hot.length === 0) return "no hot spots yet";
+        return hot.slice(0, 2).map(formatAddressHotspot).join("; ");
+      }
+
+      function formatAddressHotspot(item) {
+        if (!item) return "n/a";
+        const label = item.label ? `${item.label} ` : "";
+        return `${label}${hex(item.address)} x${formatCount(item.count)}`;
+      }
+
+      function formatCallbackHotspot(item) {
+        if (!item) return "n/a";
+        return `${hex(item.target)} from ${hex(item.callsite)} x${formatCount(item.count)}`;
+      }
+
+      function formatExceptionHotspot(item) {
+        if (!item) return "n/a";
+        return `${item.label} ${hex(item.handler)} x${formatCount(item.count)}`;
+      }
+
+      function formatUnmappedRead(item) {
+        if (!item) return "n/a";
+        return `${hex(item.address)} size ${item.size} at ${hex(item.pc)}`;
+      }
+
+      function formatPointerGuard(item) {
+        if (!item) return "n/a";
+        return `${hex(item.raw_value)} at ${hex(item.address)} -> ${hex(item.sanitized_value)}`;
+      }
+
+      function formatLastTrace(liveSummary) {
+        if (!liveSummary?.last_trace_note) return "n/a";
+        return `${formatMaybeHex(liveSummary.last_trace_pc)} ${liveSummary.last_trace_note}`;
+      }
+
+      function formatTraceOpcode(opcode16, opcode32) {
+        if (opcode32 !== undefined && opcode32 !== null) {
+          return `0x${Number(opcode32 >>> 0).toString(16).padStart(8, "0")}`;
+        }
+        if (opcode16 !== undefined && opcode16 !== null) {
+          return `0x${Number(opcode16 & 0xffff).toString(16).padStart(4, "0")}`;
+        }
+        return "n/a";
+      }
+
+      function formatStopEvent(liveSummary) {
+        if (!liveSummary?.stop_event_note) return "none";
+        return `${formatMaybeHex(liveSummary.stop_event_pc)} ${formatTraceOpcode(liveSummary.stop_event_opcode16, liveSummary.stop_event_opcode32)} ${liveSummary.stop_event_note}`;
+      }
+
+      function formatEdgeHotspot(item) {
+        if (!item) return "n/a";
+        return `${hex(item.from)} -> ${hex(item.to)} x${formatCount(item.count)}`;
+      }
+
+      function hex(value) {
+        return `0x${Number(value >>> 0).toString(16).padStart(8, "0")}`;
+      }
+
+      function label(value) {
+        return value ? `(${value})` : "";
+      }
+
+      function liveSmokeState() {
+        const hostInput = lastLiveSummary?.host_input || null;
+        const displayStats = lastLiveSummary?.display || null;
+        const sdCard = lastLiveSummary?.sd_card || null;
+        const audioStats = lastLiveSummary?.audio || null;
+        const displayCanvas = display.querySelector("canvas");
+        return {
+          buildStamp,
+          coreReady,
+          busy,
+          emulatorReady: Boolean(emulator),
+          liveRunning,
+          controlsReady: controls.querySelectorAll("button[data-action]").length,
+          displayReady: Boolean(m8WebParser && m8WebRenderer && displayCanvas),
+          displayContentReady: displayStatsReady(displayStats),
+          displaySource: displayStats?.source || "blank",
+          displayPreferred: displayStats?.preferred || null,
+          displayFormat: displayStats?.format || null,
+          displayNonBlankCells: Number(displayStats?.non_blank_cells || 0),
+          displayPrintableCells: Number(displayStats?.printable_cells || 0),
+          displayScore: Number(displayStats?.score || 0),
+          displaySlipBytesProcessed,
+          displaySlipPacketsProcessed,
+          lastDisplayError,
+          liveSessionReady: liveSessionReady(lastLiveSummary),
+          liveStartWarmupMaxSteps,
+          summaryReady: Boolean(lastLiveSummary),
+          statusText: status.textContent,
+          cycles: Number(lastLiveSummary?.cycles || 0),
+          traceTotal: Number(lastLiveSummary?.trace_total || 0),
+          traceRetained: Number(lastLiveSummary?.trace_retained || 0),
+          lastTracePc: lastLiveSummary?.last_trace_pc ?? null,
+          lastTraceOpcode16: lastLiveSummary?.last_trace_opcode16 ?? null,
+          lastTraceOpcode32: lastLiveSummary?.last_trace_opcode32 ?? null,
+          lastTraceNote: lastLiveSummary?.last_trace_note || null,
+          stopEventPc: lastLiveSummary?.stop_event_pc ?? null,
+          stopEventOpcode16: lastLiveSummary?.stop_event_opcode16 ?? null,
+          stopEventOpcode32: lastLiveSummary?.stop_event_opcode32 ?? null,
+          stopEventNote: lastLiveSummary?.stop_event_note || null,
+          pc: lastLiveSummary?.pc ?? null,
+          sp: lastLiveSummary?.sp ?? null,
+          lr: lastLiveSummary?.lr ?? null,
+          stopped: Boolean(lastLiveSummary?.stopped),
+          bootStatus: lastLiveSummary?.status || null,
+          joypadState,
+          firmwareInputReady: Boolean(hostInput?.firmware_input_ready),
+          firmwareInputCalls: Number(hostInput?.firmware_input_calls || 0),
+          lastInputHook: hostInput?.last_firmware_input_endpoint || null,
+          lastInputCallsite: hostInput?.last_firmware_input_callsite ?? null,
+          inputBase: hostInput?.active_m8_input_base ?? null,
+          remoteSerialPumpAttempts: Number(hostInput?.remote_serial_pump_attempts || 0),
+          remoteSerialPumpSuccesses: Number(hostInput?.remote_serial_pump_successes || 0),
+          remoteControllerPollAttempts: Number(hostInput?.remote_controller_poll_attempts || 0),
+          remoteControllerConsumeSuccesses: Number(hostInput?.remote_controller_consume_successes || 0),
+          remoteSerialBase: hostInput?.observed_m8_remote_serial_base ?? null,
+          remoteSerialLength: hostInput?.observed_m8_remote_serial_length ?? null,
+          remoteSerialConnected: hostInput?.observed_m8_remote_serial_connected ?? null,
+          remoteSerialActive: hostInput?.observed_m8_remote_serial_active ?? null,
+          remoteSerialBusy: hostInput?.observed_m8_remote_serial_busy ?? null,
+          remoteControllerCurrent: hostInput?.observed_m8_remote_controller_current ?? null,
+          remoteControllerPrevious: hostInput?.observed_m8_remote_controller_previous ?? null,
+          lastJoypadFirmwareState: hostInput?.last_joypad_input_state ?? null,
+          lastJoypadFirmwareEndpoint: hostInput?.last_joypad_input_endpoint ?? null,
+          lastJoypadFirmwareApplied: Boolean(hostInput?.last_joypad_input_applied),
+          inputMemoryCurrentState: hostInput?.input_memory_current_state ?? null,
+          inputMemoryPreviousState: hostInput?.input_memory_previous_state ?? null,
+          inputMemoryDirtyFlag: hostInput?.input_memory_dirty_flag ?? null,
+          sdCardPresent: Boolean(sdCard?.present),
+          sdCardBytes: Number(sdCard?.bytes || 0),
+          sdReadBlocks: Number(sdCard?.read_blocks || 0),
+          sdWrittenBlocks: Number(sdCard?.written_blocks || 0),
+          sdLastReadBlock: sdCard?.last_read_block ?? null,
+          sdLastWrittenBlock: sdCard?.last_written_block ?? null,
+          usdhcCommandCount: Number(lastLiveSummary?.usdhc_commands?.[0]?.count || 0),
+          usdhcLastCommand: lastLiveSummary?.usdhc_commands?.[0] || null,
+          usdhcCommands: lastLiveSummary?.usdhc_commands || [],
+          usdhcControllers: lastLiveSummary?.usdhc_controllers || [],
+          usdhcTopReads: lastLiveSummary?.usdhc_reads || [],
+          usdhcTopWrites: lastLiveSummary?.usdhc_writes || [],
+          audioObserved: Boolean(audioStats?.observed),
+          audioStatus: audioStats?.status || null,
+          audioReads: Number(audioStats?.total_reads || 0),
+          audioWrites: Number(audioStats?.total_writes || 0),
+          audioCapturedPcmWords: Number(audioStats?.captured_pcm_words || 0),
+          audioNonzeroPcmWords: Number(audioStats?.nonzero_pcm_words || 0),
+          audioPeakAbsSample: Number(audioStats?.peak_abs_sample || 0),
+          audioDmaTransfers: Number(audioStats?.dma_transfers || 0),
+          audioActiveDmaChannels: Number(audioStats?.active_dma_channels?.length || 0),
+          audioSourceRingNonzeroWords: Number(audioStats?.active_dma_channels?.[0]?.source_ring_nonzero_words || 0),
+          audioSourceRingPeakAbsSample: Number(audioStats?.active_dma_channels?.[0]?.source_ring_peak_abs_sample || 0),
+          lastJoypadInputApplied: Boolean(lastJoypadWorkerResult?.inputApplied),
+          lastJoypadQueuedAt,
+          lastJoypadAppliedAt,
+        };
+      }
+
+      async function runM8SmokeTest(options = {}) {
+        const action = options.action || "down";
+        const holdMs = Number(options.holdMs || minControlPressMs);
+        const failures = [];
+        const warnings = [];
+
+        if (!emulator) {
+          failures.push("emulator is not initialized");
+          return { passed: false, failures, warnings, before: liveSmokeState(), after: liveSmokeState(), delta: {} };
+        }
+
+        await warmUpLiveSession(Number(options.warmupSteps || liveStartWarmupMaxSteps));
+        await joypadInputQueue;
+        const before = liveSmokeState();
+
+        if (!before.firmwareInputReady) failures.push("firmware input shim is not ready");
+        if (!before.displayContentReady) failures.push("render-cache display is not ready");
+        if (before.stopped) failures.push(`emulator is stopped before input: ${before.bootStatus}`);
+        if (before.lastDisplayError) failures.push(`display parser error before input: ${before.lastDisplayError}`);
+
+        if (failures.length === 0) {
+          await window.__m8convertEmulatorControls.tap(action, holdMs);
+          await joypadInputQueue;
+        }
+
+        const after = liveSmokeState();
+        const delta = {
+          displaySlipBytesProcessed: after.displaySlipBytesProcessed - before.displaySlipBytesProcessed,
+          displaySlipPacketsProcessed: after.displaySlipPacketsProcessed - before.displaySlipPacketsProcessed,
+          firmwareInputCalls: after.firmwareInputCalls - before.firmwareInputCalls,
+          remoteSerialPumpAttempts: after.remoteSerialPumpAttempts - before.remoteSerialPumpAttempts,
+          remoteSerialPumpSuccesses: after.remoteSerialPumpSuccesses - before.remoteSerialPumpSuccesses,
+          remoteControllerPollAttempts: after.remoteControllerPollAttempts - before.remoteControllerPollAttempts,
+          remoteControllerConsumeSuccesses: after.remoteControllerConsumeSuccesses - before.remoteControllerConsumeSuccesses,
+          traceTotal: after.traceTotal - before.traceTotal,
+          cycles: after.cycles - before.cycles,
+        };
+
+        if (failures.length === 0) {
+          if (!after.lastJoypadInputApplied) failures.push(`joypad action "${action}" was not applied`);
+          if (delta.displaySlipPacketsProcessed <= 0) {
+            failures.push(`joypad action "${action}" emitted no display frame`);
+          }
+          if (!after.displayContentReady) failures.push("render-cache display was lost after input");
+          if (after.stopped) failures.push(`emulator stopped after input: ${after.bootStatus}`);
+          if (after.stopEventNote) failures.push(`stop event after input: ${after.stopEventNote}`);
+          if (after.lastDisplayError) failures.push(`display parser error after input: ${after.lastDisplayError}`);
+        }
+
+        if (after.sdCardPresent && after.sdReadBlocks === 0) {
+          const command = after.usdhcLastCommand;
+          if (command) {
+            warnings.push(
+              `SD card is mounted but firmware has not read data blocks; last uSDHC command was CMD${command.command_index} on ${command.instance} x${command.count}`,
+            );
+          } else {
+            warnings.push("SD card is mounted but firmware has not issued uSDHC data-read commands in this smoke path");
+          }
+        }
+        if (
+          after.audioObserved
+          && after.audioSourceRingNonzeroWords > 0
+          && after.audioNonzeroPcmWords === 0
+        ) {
+          warnings.push("Audio DMA source ring has nonzero samples, but captured PCM is still silent");
+        }
+        if (!after.audioObserved) {
+          warnings.push("Audio MMIO/DMA has not been observed yet");
+        }
+
+        return {
+          passed: failures.length === 0,
+          action,
+          failures,
+          warnings,
+          before,
+          after,
+          delta,
+        };
+      }
+
+      function publishSmokeState() {
+        const node = document.getElementById("m8-smoke-state");
+        if (!node) return;
+        node.textContent = JSON.stringify(liveSmokeState());
+      }
+
+      function publishSmokeTestResult(payload) {
+        const node = document.getElementById("m8-smoke-test-result");
+        if (!node) return;
+        node.textContent = JSON.stringify(payload);
+      }
+
+      window.addEventListener("m8convert-run-smoke-test", async () => {
+        const node = document.getElementById("m8-smoke-test-result");
+        let options = {};
+        if (node?.dataset.options) {
+          try {
+            options = JSON.parse(node.dataset.options);
+          } catch (error) {
+            publishSmokeTestResult({
+              status: "error",
+              error: `Could not parse smoke test options: ${error instanceof Error ? error.message : String(error)}`,
+            });
+            return;
+          }
+        }
+        publishSmokeTestResult({ status: "running", started_at: new Date().toISOString() });
+        try {
+          const result = await runM8SmokeTest(options);
+          publishSmokeTestResult({
+            status: result.passed ? "passed" : "failed",
+            finished_at: new Date().toISOString(),
+            result,
+          });
+        } catch (error) {
+          publishSmokeTestResult({
+            status: "error",
+            finished_at: new Date().toISOString(),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+
+      window.__m8convertTestHooks = {
+        renderAnalysis,
+        renderDisplaySnapshot,
+        bootProbeStatusText,
+        smokeState: liveSmokeState,
+        runSmokeTest: async (options) => runM8SmokeTest(options),
+        tapAndReport: async (action, holdMs) => {
+          await window.__m8convertEmulatorControls.tap(action, holdMs);
+          return liveSmokeState();
+        },
+      };
+    </script>
+  </body>
+</html>

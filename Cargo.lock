@@ -213,6 +213,8 @@ dependencies = [
  "serde_json",
  "thiserror",
  "wasm-bindgen",
+ "xmrs",
+ "xmrsplayer",
 ]
 
 [[package]]
@@ -500,6 +502,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "xmrs"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "891622ae5fc3a868e33174cb381017a5fe41eb8f2604139c324d5b164177e840"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "xmrsplayer"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58eb50a9bc5f0ae369b571b4536bc6a1532ebec0e4846f6082686e2915dacee7"
+dependencies = [
+ "xmrs",
 ]
 
 [[package]]

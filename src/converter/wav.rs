@@ -1,5 +1,5 @@
-use crate::modfile::Sample;
-use crate::s3mfile::S3mInstrument;
+use crate::converter::modfile::Sample;
+use crate::converter::s3mfile::S3mInstrument;
 
 const SAMPLE_RATE: u32 = 8363;
 
@@ -44,9 +44,18 @@ pub fn encode_sample_as_wav(sample: &Sample) -> Vec<u8> {
 
 pub fn encode_s3m_sample_as_wav(sample: &S3mInstrument) -> Vec<u8> {
     let source_rate = sample.c5_speed.max(1);
-    let mut data = Vec::with_capacity(sample.data.len() * 2);
-    for value in &sample.data {
-        data.extend_from_slice(&value.to_le_bytes());
+    let channels = if sample.right_data.is_some() {
+        2u16
+    } else {
+        1u16
+    };
+    let block_align = channels * 2;
+    let mut data = Vec::with_capacity(sample.data.len() * block_align as usize);
+    for (index, left) in sample.data.iter().enumerate() {
+        data.extend_from_slice(&left.to_le_bytes());
+        if let Some(right) = &sample.right_data {
+            data.extend_from_slice(&right.get(index).copied().unwrap_or_default().to_le_bytes());
+        }
     }
 
     let smpl_chunk = sample.is_looped().then(|| {
@@ -58,6 +67,7 @@ pub fn encode_s3m_sample_as_wav(sample: &S3mInstrument) -> Vec<u8> {
         smpl_chunk_from_points(
             loop_start.min(sample.data.len().saturating_sub(1) as u32),
             loop_end,
+            u32::from(sample.ping_pong_loop),
         )
     });
     let smpl_len = smpl_chunk.as_ref().map(|chunk| chunk.len()).unwrap_or(0);
@@ -71,10 +81,10 @@ pub fn encode_s3m_sample_as_wav(sample: &S3mInstrument) -> Vec<u8> {
     out.extend_from_slice(b"fmt ");
     write_u32(&mut out, 16);
     write_u16(&mut out, 1);
-    write_u16(&mut out, 1);
+    write_u16(&mut out, channels);
     write_u32(&mut out, source_rate);
-    write_u32(&mut out, source_rate * 2);
-    write_u16(&mut out, 2);
+    write_u32(&mut out, source_rate.saturating_mul(u32::from(block_align)));
+    write_u16(&mut out, block_align);
     write_u16(&mut out, 16);
 
     if let Some(chunk) = smpl_chunk {
@@ -92,13 +102,13 @@ fn smpl_chunk(sample: &Sample) -> Vec<u8> {
     let loop_end = (sample.loop_start_bytes + sample.loop_length_bytes)
         .saturating_sub(1)
         .min(sample.length_bytes.saturating_sub(1)) as u32;
-    smpl_chunk_from_points(loop_start, loop_end)
+    smpl_chunk_from_points(loop_start, loop_end, 0)
 }
 
-fn smpl_chunk_from_points(loop_start: u32, loop_end: u32) -> Vec<u8> {
+fn smpl_chunk_from_points(loop_start: u32, loop_end: u32, loop_type: u32) -> Vec<u8> {
     let mut payload = Vec::with_capacity(60);
     write_u32(&mut payload, 0);
-    write_u32(&mut payload, 0);
+    write_u32(&mut payload, loop_type);
     write_u32(&mut payload, 0);
     write_u32(&mut payload, 60);
     write_u32(&mut payload, 0);
@@ -162,7 +172,12 @@ mod tests {
             flags: 1,
             c5_speed: 11_025,
             pack: 0,
+            default_pan: None,
+            amp_envelope: None,
+            auto_vibrato: None,
             data: vec![0, 1000, -1000, 0],
+            right_data: None,
+            ping_pong_loop: false,
         };
 
         let wav = encode_s3m_sample_as_wav(&sample);
@@ -173,5 +188,32 @@ mod tests {
         );
         assert_eq!(u16::from_le_bytes(wav[34..36].try_into().unwrap()), 16);
         assert_eq!(wav.len(), 44 + 68 + sample.data.len() * 2);
+    }
+
+    #[test]
+    fn s3m_wav_preserves_stereo_channels() {
+        let sample = S3mInstrument {
+            kind: 1,
+            name: "stereo".to_string(),
+            length: 2,
+            loop_start: 0,
+            loop_end: 0,
+            volume: 64,
+            flags: 0x02,
+            c5_speed: 8_000,
+            pack: 0,
+            default_pan: None,
+            amp_envelope: None,
+            auto_vibrato: None,
+            data: vec![1, 2],
+            right_data: Some(vec![3, 4]),
+            ping_pong_loop: false,
+        };
+
+        let wav = encode_s3m_sample_as_wav(&sample);
+        assert_eq!(u16::from_le_bytes(wav[22..24].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(wav[28..32].try_into().unwrap()), 32_000);
+        assert_eq!(u16::from_le_bytes(wav[32..34].try_into().unwrap()), 4);
+        assert_eq!(&wav[44..52], &[1, 0, 3, 0, 2, 0, 4, 0]);
     }
 }
